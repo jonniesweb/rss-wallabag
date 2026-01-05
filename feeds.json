@@ -5,6 +5,18 @@
       "url": "https://jonsimpson.ca/rss.xml",
       "tags": ["blog", "tech"],
       "max_items": 10
+    },
+    {
+      "name": "Simon Willison - Everything",
+      "url": "https://simonwillison.net/atom/everything/",
+      "tags": ["blog", "tech"],
+      "max_items": 10
+    },
+    {
+      "name": "Cloudflare Blog",
+      "url": "https://blog.cloudflare.com/rss/",
+      "tags": ["blog", "tech", "cloudflare"],
+      "max_items": 10
     }
   ]
 }

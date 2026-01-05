@@ -102,6 +102,7 @@ class WallabagClient:
             params['title'] = title
         
         if tags:
+            # Tags should be a comma-separated string
             if isinstance(tags, list):
                 tags = ','.join(tags)
             params['tags'] = tags
@@ -302,10 +303,20 @@ class RSSFeedTracker:
                 'seen_at': datetime.now().isoformat()
             }
             
+            # Extract tags from RSS item
+            item_tags = []
+            if hasattr(item, 'tags') and item.tags:
+                # Tags are a list of dicts with 'term' keys
+                item_tags = [tag.get('term', '') for tag in item.tags if tag.get('term')]
+            elif hasattr(item, 'category') and item.category:
+                # Fallback to category if no tags
+                item_tags = [item.category]
+            
             # Post to Wallabag
             item_title = item.get('title', '')
             published_date = self.get_item_published_date(item)
-            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags, published_at=published_date)
+            tags_string = ','.join(item_tags) if item_tags else None
+            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags_string, published_at=published_date)
             
             if result:
                 new_count += 1

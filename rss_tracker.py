@@ -75,7 +75,14 @@ class WallabagClient:
             return None
     
     def create_entry(self, url, title=None, tags=None, published_at=None):
-        """Create a new entry in Wallabag."""
+        """Create a new entry in Wallabag.
+        
+        Args:
+            url: URL of the entry
+            title: Optional title for the entry
+            tags: Optional tags (list or comma-separated string)
+            published_at: Optional publication date in format YYYY-MM-DDTHH:MM:SS+0000
+        """
         if not self.get_token():
             logger.error("Cannot create entry: no access token")
             return None
@@ -100,24 +107,42 @@ class WallabagClient:
             params['tags'] = tags
         
         if published_at:
-            params['published_at'] = published_at
+            # Ensure published_at is a string in the correct format
+            if not isinstance(published_at, str):
+                logger.warning(f"published_at must be a string, got {type(published_at)}")
+            else:
+                # Validate format: YYYY-MM-DDTHH:MM:SS+0000 (24 chars)
+                if len(published_at) == 24 and published_at[10] == 'T' and published_at[19] == '+':
+                    params['published_at'] = published_at
+                else:
+                    logger.warning(f"published_at format may be incorrect: {published_at} (expected YYYY-MM-DDTHH:MM:SS+0000)")
+                    # Still send it, but log a warning
+                    params['published_at'] = published_at
         
         try:
+            if published_at:
+                logger.debug(f"Sending published_at: {published_at} for URL: {url}")
             response = requests.post(entries_url, headers=headers, json=params, timeout=10)
             response.raise_for_status()
             result = response.json()
             
-            # If published_at was provided, ensure it's set correctly
-            # This handles both new entries and existing entries (duplicates)
+            # If published_at was provided but not set in response, update the entry
             if published_at:
-                entry_id = result.get('id')
-                current_published_at = result.get('published_at')
-                
-                # Update if not set or different from what we want
-                if entry_id and current_published_at != published_at:
-                    # Wait a moment for content fetching to complete, then update
-                    time.sleep(2)
-                    self.update_entry(entry_id, published_at=published_at)
+                returned_published = result.get('published_at')
+                if returned_published != published_at:
+                    entry_id = result.get('id')
+                    if entry_id:
+                        # Wait a moment for content fetching, then update
+                        time.sleep(3)
+                        update_url = f"{self.url}/api/entries/{entry_id}.json"
+                        update_params = {'published_at': published_at}
+                        try:
+                            update_resp = requests.patch(update_url, headers=headers, json=update_params, timeout=10)
+                            update_resp.raise_for_status()
+                            result = update_resp.json()
+                            logger.debug(f"Updated published_at to {published_at} for entry {entry_id}")
+                        except Exception as e:
+                            logger.debug(f"Failed to update published_at: {e}")
             
             logger.info(f"Created Wallabag entry: {title or url}")
             return result
@@ -125,33 +150,6 @@ class WallabagClient:
             logger.error(f"Failed to create Wallabag entry: {e}")
             if 'response' in locals():
                 logger.error(f"Response: {response.text}")
-            return None
-    
-    def update_entry(self, entry_id, published_at=None):
-        """Update an existing entry in Wallabag."""
-        if not self.get_token():
-            return None
-        
-        entry_url = f"{self.url}/api/entries/{entry_id}.json"
-        
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json'
-        }
-        
-        params = {}
-        if published_at:
-            params['published_at'] = published_at
-        
-        if not params:
-            return None
-        
-        try:
-            response = requests.patch(entry_url, headers=headers, json=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.debug(f"Failed to update entry {entry_id}: {e}")
             return None
 
 

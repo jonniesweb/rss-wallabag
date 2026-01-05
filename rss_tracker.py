@@ -180,6 +180,12 @@ class RSSFeedTracker:
     def load_seen_items(self):
         """Load seen items from seen_items.json."""
         try:
+            # Check if path exists and is a directory (Docker volume mount issue)
+            if self.seen_file.exists() and self.seen_file.is_dir():
+                logger.warning(f"seen_items.json is a directory, removing it and creating a new file")
+                import shutil
+                shutil.rmtree(self.seen_file)
+            
             if not self.seen_file.exists():
                 return {}
             

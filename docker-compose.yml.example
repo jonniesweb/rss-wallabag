@@ -1,0 +1,20 @@
+services:
+  rss-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rss-wallabag:latest
+    environment:
+      - WALLABAG_URL=http://wallabag
+      - WALLABAG_CLIENT_ID=your_client_id_here
+      - WALLABAG_CLIENT_SECRET=your_client_secret_here
+      - WALLABAG_USERNAME=your_username_here
+      - WALLABAG_PASSWORD=your_password_here
+      - FEEDS_FILE=/app/feeds.json
+      - SEEN_FILE=/app/seen_items.json
+      - INTERVAL_MINUTES=30
+      - DEFAULT_FETCH_COUNT=10
+    volumes:
+      - ./feeds.json:/app/feeds.json:ro
+      - ./seen_items.json:/app/seen_items.json
+    restart: unless-stopped

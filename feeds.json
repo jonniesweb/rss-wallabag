@@ -1,0 +1,10 @@
+{
+  "feeds": [
+    {
+      "name": "Jon Simpson",
+      "url": "https://jonsimpson.ca/rss.xml",
+      "tags": ["blog", "tech"],
+      "max_items": 10
+    }
+  ]
+}

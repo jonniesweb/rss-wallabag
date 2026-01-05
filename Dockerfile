@@ -9,6 +9,6 @@ COPY rss_tracker.py .
 COPY feeds.json .
 
 # Create directories for data files
-RUN mkdir -p /app && chmod 755 /app
+RUN mkdir -p /app/data && chmod 755 /app/data
 
 CMD ["python", "rss_tracker.py"]

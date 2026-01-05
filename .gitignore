@@ -6,6 +6,7 @@ feeds.json
 
 # Runtime data
 seen_items.json
+data/
 
 # Python
 __pycache__/

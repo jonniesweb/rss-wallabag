@@ -28,7 +28,7 @@ WALLABAG_CLIENT_SECRET = os.getenv('WALLABAG_CLIENT_SECRET', '')
 WALLABAG_USERNAME = os.getenv('WALLABAG_USERNAME', '')
 WALLABAG_PASSWORD = os.getenv('WALLABAG_PASSWORD', '')
 FEEDS_FILE = os.getenv('FEEDS_FILE', '/app/feeds.json')
-SEEN_FILE = os.getenv('SEEN_FILE', '/app/seen_items.json')
+SEEN_FILE = os.getenv('SEEN_FILE', '/app/data/seen_items.json')
 INTERVAL_MINUTES = int(os.getenv('INTERVAL_MINUTES', '30'))
 DEFAULT_FETCH_COUNT = int(os.getenv('DEFAULT_FETCH_COUNT', '10'))
 

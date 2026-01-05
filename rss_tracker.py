@@ -106,12 +106,52 @@ class WallabagClient:
             response = requests.post(entries_url, headers=headers, json=params, timeout=10)
             response.raise_for_status()
             result = response.json()
+            
+            # If published_at was provided, ensure it's set correctly
+            # This handles both new entries and existing entries (duplicates)
+            if published_at:
+                entry_id = result.get('id')
+                current_published_at = result.get('published_at')
+                
+                # Update if not set or different from what we want
+                if entry_id and current_published_at != published_at:
+                    # Wait a moment for content fetching to complete, then update
+                    time.sleep(2)
+                    self.update_entry(entry_id, published_at=published_at)
+            
             logger.info(f"Created Wallabag entry: {title or url}")
             return result
         except Exception as e:
             logger.error(f"Failed to create Wallabag entry: {e}")
             if 'response' in locals():
                 logger.error(f"Response: {response.text}")
+            return None
+    
+    def update_entry(self, entry_id, published_at=None):
+        """Update an existing entry in Wallabag."""
+        if not self.get_token():
+            return None
+        
+        entry_url = f"{self.url}/api/entries/{entry_id}.json"
+        
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        params = {}
+        if published_at:
+            params['published_at'] = published_at
+        
+        if not params:
+            return None
+        
+        try:
+            response = requests.patch(entry_url, headers=headers, json=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.debug(f"Failed to update entry {entry_id}: {e}")
             return None
 
 
@@ -162,21 +202,29 @@ class RSSFeedTracker:
         """Generate a unique hash for an RSS item."""
         return hashlib.sha256(f"{feed_url}:{item_url}".encode()).hexdigest()
     
-    def get_item_published_timestamp(self, item):
-        """Extract publication date from RSS item and convert to Unix timestamp."""
+    def get_item_published_date(self, item):
+        """Extract publication date from RSS item and convert to ISO 8601 format (YYYY-MM-DDTHH:MM:SS+TZ)."""
         # Try published_parsed first (most reliable)
         if hasattr(item, 'published_parsed') and item.published_parsed:
             try:
-                return int(time.mktime(item.published_parsed))
-            except (ValueError, OSError) as e:
-                logger.debug(f"Error converting published_parsed to timestamp: {e}")
+                # Convert struct_time to datetime
+                dt = datetime(*item.published_parsed[:6])
+                # Format as ISO 8601 with timezone (assuming UTC if no timezone info)
+                # Use +0000 format (4 digits) instead of +00:00 (5 chars) as API expects
+                return dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
+            except (ValueError, OSError, TypeError) as e:
+                logger.debug(f"Error converting published_parsed to ISO format: {e}")
         
         # Fall back to updated_parsed if published_parsed is not available
         if hasattr(item, 'updated_parsed') and item.updated_parsed:
             try:
-                return int(time.mktime(item.updated_parsed))
-            except (ValueError, OSError) as e:
-                logger.debug(f"Error converting updated_parsed to timestamp: {e}")
+                # Convert struct_time to datetime
+                dt = datetime(*item.updated_parsed[:6])
+                # Format as ISO 8601 with timezone (assuming UTC if no timezone info)
+                # Use +0000 format (4 digits) instead of +00:00 (5 chars) as API expects
+                return dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
+            except (ValueError, OSError, TypeError) as e:
+                logger.debug(f"Error converting updated_parsed to ISO format: {e}")
         
         # If no parsed date available, return None
         return None
@@ -258,8 +306,8 @@ class RSSFeedTracker:
             
             # Post to Wallabag
             item_title = item.get('title', '')
-            published_timestamp = self.get_item_published_timestamp(item)
-            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags, published_at=published_timestamp)
+            published_date = self.get_item_published_date(item)
+            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags, published_at=published_date)
             
             if result:
                 new_count += 1

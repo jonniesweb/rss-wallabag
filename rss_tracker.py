@@ -11,6 +11,8 @@ import logging
 import hashlib
 import requests
 import argparse
+import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 import feedparser
@@ -162,6 +164,23 @@ class RSSFeedTracker:
         self.feeds_file = Path(FEEDS_FILE)
         self.seen_file = Path(SEEN_FILE)
         self.seen_items = self.load_seen_items()
+        self.shutdown_requested = False
+        self._setup_signal_handlers()
+    
+    def _setup_signal_handlers(self):
+        """Set up signal handlers for graceful shutdown."""
+        def signal_handler(signum, frame):
+            # Get signal name for logging
+            signal_names = {
+                signal.SIGTERM: 'SIGTERM',
+                signal.SIGINT: 'SIGINT',
+            }
+            signal_name = signal_names.get(signum, f'signal {signum}')
+            logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+            self.shutdown_requested = True
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
     
     def load_feeds(self):
         """Load RSS feeds from feeds.json."""
@@ -342,36 +361,57 @@ class RSSFeedTracker:
         """
         logger.info("Starting RSS feed tracker" + (" (one-off run)" if once else ""))
         
-        while True:
-            try:
-                feeds = self.load_feeds()
+        try:
+            while not self.shutdown_requested:
+                try:
+                    feeds = self.load_feeds()
+                    
+                    if not feeds:
+                        logger.warning("No feeds configured. Add feeds to feeds.json")
+                    else:
+                        logger.info(f"Processing {len(feeds)} feeds")
+                        for feed_config in feeds:
+                            if self.shutdown_requested:
+                                break
+                            try:
+                                self.process_feed(feed_config)
+                            except Exception as e:
+                                logger.error(f"Error processing feed {feed_config.get('url', 'unknown')}: {e}", exc_info=True)
+                    
+                    if once or self.shutdown_requested:
+                        break
+                    
+                    # Sleep in smaller intervals to check shutdown flag
+                    logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes...")
+                    sleep_seconds = INTERVAL_MINUTES * 60
+                    sleep_interval = 1  # Check every second
+                    slept = 0
+                    while slept < sleep_seconds and not self.shutdown_requested:
+                        time.sleep(min(sleep_interval, sleep_seconds - slept))
+                        slept += sleep_interval
                 
-                if not feeds:
-                    logger.warning("No feeds configured. Add feeds to feeds.json")
-                else:
-                    logger.info(f"Processing {len(feeds)} feeds")
-                    for feed_config in feeds:
-                        try:
-                            self.process_feed(feed_config)
-                        except Exception as e:
-                            logger.error(f"Error processing feed {feed_config.get('url', 'unknown')}: {e}", exc_info=True)
-                
-                if once:
-                    logger.info("One-off run complete. Exiting.")
+                except KeyboardInterrupt:
+                    logger.info("Received KeyboardInterrupt, shutting down...")
+                    self.shutdown_requested = True
                     break
-                
-                logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes...")
-                time.sleep(INTERVAL_MINUTES * 60)
-            
-            except KeyboardInterrupt:
-                logger.info("Shutting down...")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                if once:
-                    break
-                logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes before retry...")
-                time.sleep(INTERVAL_MINUTES * 60)
+                except Exception as e:
+                    logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+                    if once or self.shutdown_requested:
+                        break
+                    # Sleep in smaller intervals to check shutdown flag
+                    logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes before retry...")
+                    sleep_seconds = INTERVAL_MINUTES * 60
+                    sleep_interval = 1
+                    slept = 0
+                    while slept < sleep_seconds and not self.shutdown_requested:
+                        time.sleep(min(sleep_interval, sleep_seconds - slept))
+                        slept += sleep_interval
+        finally:
+            # Always save seen items on shutdown
+            if self.seen_items:
+                logger.info("Saving seen items before shutdown...")
+                self.save_seen_items()
+            logger.info("RSS feed tracker stopped")
 
 
 def main():

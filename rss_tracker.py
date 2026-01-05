@@ -10,6 +10,7 @@ import time
 import logging
 import hashlib
 import requests
+import argparse
 from datetime import datetime
 from pathlib import Path
 import feedparser
@@ -73,7 +74,7 @@ class WallabagClient:
             logger.error(f"Failed to get Wallabag token: {e}")
             return None
     
-    def create_entry(self, url, title=None, tags=None):
+    def create_entry(self, url, title=None, tags=None, published_at=None):
         """Create a new entry in Wallabag."""
         if not self.get_token():
             logger.error("Cannot create entry: no access token")
@@ -97,6 +98,9 @@ class WallabagClient:
             if isinstance(tags, list):
                 tags = ','.join(tags)
             params['tags'] = tags
+        
+        if published_at:
+            params['published_at'] = published_at
         
         try:
             response = requests.post(entries_url, headers=headers, json=params, timeout=10)
@@ -158,11 +162,35 @@ class RSSFeedTracker:
         """Generate a unique hash for an RSS item."""
         return hashlib.sha256(f"{feed_url}:{item_url}".encode()).hexdigest()
     
+    def get_item_published_timestamp(self, item):
+        """Extract publication date from RSS item and convert to Unix timestamp."""
+        # Try published_parsed first (most reliable)
+        if hasattr(item, 'published_parsed') and item.published_parsed:
+            try:
+                return int(time.mktime(item.published_parsed))
+            except (ValueError, OSError) as e:
+                logger.debug(f"Error converting published_parsed to timestamp: {e}")
+        
+        # Fall back to updated_parsed if published_parsed is not available
+        if hasattr(item, 'updated_parsed') and item.updated_parsed:
+            try:
+                return int(time.mktime(item.updated_parsed))
+            except (ValueError, OSError) as e:
+                logger.debug(f"Error converting updated_parsed to timestamp: {e}")
+        
+        # If no parsed date available, return None
+        return None
+    
     def fetch_feed(self, feed_url, max_items=None):
         """Fetch and parse an RSS feed."""
         try:
             logger.info(f"Fetching feed: {feed_url}")
-            feed = feedparser.parse(feed_url)
+            # Fetch feed content with timeout
+            response = requests.get(feed_url, timeout=5)
+            response.raise_for_status()
+            
+            # Parse the feed content
+            feed = feedparser.parse(response.content)
             
             if feed.bozo:
                 logger.warning(f"Feed parsing warning for {feed_url}: {feed.bozo_exception}")
@@ -174,8 +202,14 @@ class RSSFeedTracker:
             items = feed.entries[:max_items] if max_items else feed.entries
             logger.info(f"Found {len(items)} items in feed: {feed_url}")
             return items
-        except Exception as e:
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout fetching feed {feed_url} (5 seconds)")
+            return []
+        except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching feed {feed_url}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error parsing feed {feed_url}: {e}")
             return []
     
     def process_feed(self, feed_config):
@@ -195,9 +229,10 @@ class RSSFeedTracker:
         
         if is_new_feed:
             logger.info(f"New feed detected: {feed_name}. Fetching last {max_items} items.")
-            items = self.fetch_feed(feed_url, max_items=max_items)
         else:
-            items = self.fetch_feed(feed_url)
+            logger.info(f"Fetching last {max_items} items from {feed_name}.")
+        
+        items = self.fetch_feed(feed_url, max_items=max_items)
         
         new_count = 0
         for item in items:
@@ -223,7 +258,8 @@ class RSSFeedTracker:
             
             # Post to Wallabag
             item_title = item.get('title', '')
-            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags)
+            published_timestamp = self.get_item_published_timestamp(item)
+            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags, published_at=published_timestamp)
             
             if result:
                 new_count += 1
@@ -235,9 +271,13 @@ class RSSFeedTracker:
             logger.info(f"Processed {new_count} new items from {feed_name}")
             self.save_seen_items()
     
-    def run(self):
-        """Run the RSS feed tracker."""
-        logger.info("Starting RSS feed tracker")
+    def run(self, once=False):
+        """Run the RSS feed tracker.
+        
+        Args:
+            once: If True, process feeds once and exit. If False, run continuously.
+        """
+        logger.info("Starting RSS feed tracker" + (" (one-off run)" if once else ""))
         
         while True:
             try:
@@ -253,6 +293,10 @@ class RSSFeedTracker:
                         except Exception as e:
                             logger.error(f"Error processing feed {feed_config.get('url', 'unknown')}: {e}", exc_info=True)
                 
+                if once:
+                    logger.info("One-off run complete. Exiting.")
+                    break
+                
                 logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes...")
                 time.sleep(INTERVAL_MINUTES * 60)
             
@@ -261,12 +305,19 @@ class RSSFeedTracker:
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+                if once:
+                    break
                 logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes before retry...")
                 time.sleep(INTERVAL_MINUTES * 60)
 
 
 def main():
     """Main entry point."""
+    parser = argparse.ArgumentParser(description='RSS Feed Tracker for Wallabag')
+    parser.add_argument('--once', action='store_true', 
+                       help='Run once and exit instead of running continuously')
+    args = parser.parse_args()
+    
     # Validate required configuration
     required_vars = ['WALLABAG_CLIENT_ID', 'WALLABAG_CLIENT_SECRET', 
                      'WALLABAG_USERNAME', 'WALLABAG_PASSWORD']
@@ -282,7 +333,7 @@ def main():
     logger.info(f"Check interval: {INTERVAL_MINUTES} minutes")
     
     tracker = RSSFeedTracker()
-    tracker.run()
+    tracker.run(once=args.once)
 
 
 if __name__ == '__main__':

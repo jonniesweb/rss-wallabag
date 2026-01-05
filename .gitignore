@@ -1,0 +1,16 @@
+# Docker compose with secrets
+docker-compose.yml
+
+# User-specific configuration
+feeds.json
+
+# Runtime data
+seen_items.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/

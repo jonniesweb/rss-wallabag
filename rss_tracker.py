@@ -253,6 +253,12 @@ class RSSFeedTracker:
         # If no parsed date available, return None
         return None
     
+    def is_medium_url(self, url):
+        """Check if a URL is hosted on Medium."""
+        if not url:
+            return False
+        return 'medium.com' in url.lower()
+    
     def fetch_feed(self, feed_url, max_items=None):
         """Fetch and parse an RSS feed."""
         try:
@@ -341,7 +347,14 @@ class RSSFeedTracker:
             item_title = item.get('title', '')
             published_date = self.get_item_published_date(item)
             tags_string = ','.join(item_tags) if item_tags else None
-            result = self.wallabag.create_entry(item_url, title=item_title, tags=tags_string, published_at=published_date)
+            
+            # Use Freedium mirror for Medium posts
+            actual_url = item_url
+            if self.is_medium_url(item_url):
+                actual_url = f"https://freedium-mirror.cfd/{item_url}"
+                logger.info(f"Using Freedium mirror for Medium post: {item_title}")
+            
+            result = self.wallabag.create_entry(actual_url, title=item_title, tags=tags_string, published_at=published_date)
             
             if result:
                 new_count += 1

@@ -15,6 +15,7 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 import feedparser
 
 logging.basicConfig(
@@ -259,6 +260,24 @@ class RSSFeedTracker:
             return False
         return 'medium.com' in url.lower()
     
+    def resolve_url(self, feed_url, item_url):
+        """Resolve a potentially relative URL to an absolute URL using the feed URL as base.
+        
+        Args:
+            feed_url: The URL of the RSS feed (used as base)
+            item_url: The URL from the RSS item (may be relative or absolute)
+        
+        Returns:
+            An absolute URL
+        """
+        if not item_url:
+            return item_url
+        
+        # urljoin handles both relative and absolute URLs correctly
+        # If item_url is already absolute, it returns it unchanged
+        # If item_url is relative, it joins it with the base URL from feed_url
+        return urljoin(feed_url, item_url)
+    
     def fetch_feed(self, feed_url, max_items=None):
         """Fetch and parse an RSS feed."""
         try:
@@ -317,6 +336,9 @@ class RSSFeedTracker:
             item_url = item.get('link', '')
             if not item_url:
                 continue
+            
+            # Resolve relative URLs to absolute URLs using the feed URL as base
+            item_url = self.resolve_url(feed_url, item_url)
             
             item_hash = self.get_item_hash(feed_url, item_url)
             

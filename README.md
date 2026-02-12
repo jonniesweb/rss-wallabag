@@ -74,6 +74,16 @@ cd ~/docker/rss-wallabag
 docker-compose restart
 ```
 
+## Updating Code
+
+After pulling code changes (e.g., `git pull`), **always rebuild** the image:
+```bash
+cd ~/docker/rss-wallabag
+docker-compose up --build -d
+```
+
+⚠️ Just using `docker-compose restart` or `up -d` won't pick up code changes — you must use `--build` to rebuild the image.
+
 ## Status
 
 Check container status:

@@ -388,13 +388,19 @@ class RSSFeedTracker:
             logger.info(f"Processed {new_count} new items from {feed_name}")
             self.save_seen_items()
     
-    def run(self, once=False):
+    def run(self, once=False, clip=False):
         """Run the RSS feed tracker.
         
         Args:
             once: If True, process feeds once and exit. If False, run continuously.
+            clip: If True, process feeds once, sleep for interval, then exit.
         """
-        logger.info("Starting RSS feed tracker" + (" (one-off run)" if once else ""))
+        mode_str = ""
+        if once:
+            mode_str = " (one-off run)"
+        elif clip:
+            mode_str = " (clip mode: will exit after sleep)"
+        logger.info("Starting RSS feed tracker" + mode_str)
         
         try:
             while not self.shutdown_requested:
@@ -424,6 +430,11 @@ class RSSFeedTracker:
                     while slept < sleep_seconds and not self.shutdown_requested:
                         time.sleep(min(sleep_interval, sleep_seconds - slept))
                         slept += sleep_interval
+                    
+                    # Exit after sleep if clip mode
+                    if clip:
+                        logger.info("Clip mode: exiting after sleep")
+                        break
                 
                 except KeyboardInterrupt:
                     logger.info("Received KeyboardInterrupt, shutting down...")
@@ -454,6 +465,8 @@ def main():
     parser = argparse.ArgumentParser(description='RSS Feed Tracker for Wallabag')
     parser.add_argument('--once', action='store_true', 
                        help='Run once and exit instead of running continuously')
+    parser.add_argument('--clip', action='store_true',
+                       help='Run once, sleep for interval, then exit')
     args = parser.parse_args()
     
     # Validate required configuration
@@ -471,7 +484,7 @@ def main():
     logger.info(f"Check interval: {INTERVAL_MINUTES} minutes")
     
     tracker = RSSFeedTracker()
-    tracker.run(once=args.once)
+    tracker.run(once=args.once, clip=args.clip)
 
 
 if __name__ == '__main__':

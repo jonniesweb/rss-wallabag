@@ -1,0 +1,16 @@
+{
+  "feeds": [
+    {
+      "name": "Example Blog",
+      "url": "https://example.com/rss.xml",
+      "tags": ["example", "tech"],
+      "max_items": 10
+    },
+    {
+      "name": "Another Example Feed",
+      "url": "https://another-example.com/feed",
+      "tags": ["blog"],
+      "max_items": 5
+    }
+  ]
+}

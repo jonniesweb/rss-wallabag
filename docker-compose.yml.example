@@ -10,11 +10,12 @@ services:
       - WALLABAG_CLIENT_SECRET=your_client_secret_here
       - WALLABAG_USERNAME=your_username_here
       - WALLABAG_PASSWORD=your_password_here
-      - FEEDS_FILE=/app/feeds.json
-      - SEEN_FILE=/app/data/seen_items.json
+      - DATABASE_FILE=/app/data/rss_tracker.db
+      - LEGACY_FEEDS_FILE=/app/legacy/feeds.json
+      - LEGACY_SEEN_FILE=/app/data/seen_items.json
       - INTERVAL_MINUTES=30
       - DEFAULT_FETCH_COUNT=10
     volumes:
-      - ./feeds.json:/app/feeds.json:ro
+      - ./feeds.json:/app/legacy/feeds.json:ro
       - ./data:/app/data
     restart: unless-stopped

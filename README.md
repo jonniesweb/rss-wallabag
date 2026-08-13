@@ -5,9 +5,10 @@ This service automatically fetches RSS feeds every 30 minutes and posts new item
 ## Features
 
 - Fetches RSS feeds on a 30-minute schedule
-- Normalizes article URLs and tracks seen items to avoid duplicates
+- Stores feeds and seen articles transactionally in SQLite
+- Normalizes article URLs before deduplication
 - When adding a new feed, fetches the last 10 items by default
-- Stores feeds in `feeds.json` for easy management
+- Includes a safe CLI for adding, updating, enabling, and disabling feeds
 - Automatically posts new items to Wallabag via API
 
 ## Configuration
@@ -19,45 +20,64 @@ The service is configured via `docker-compose.yml` with the following environmen
 - `WALLABAG_CLIENT_SECRET` - OAuth2 client secret
 - `WALLABAG_USERNAME` - Wallabag username
 - `WALLABAG_PASSWORD` - Wallabag password
+- `DATABASE_FILE` - SQLite database path (default: `/app/data/rss_tracker.db`)
+- `LEGACY_FEEDS_FILE` - One-time feed migration source
+- `LEGACY_SEEN_FILE` - One-time seen-item migration source
 - `INTERVAL_MINUTES` - Check interval (default: 30)
 - `DEFAULT_FETCH_COUNT` - Items to fetch for new feeds (default: 10)
 
 ## Adding RSS Feeds
 
-Edit `feeds.json` to add new RSS feeds:
+Use `feed_cli.py` to manage feeds:
 
-```json
-{
-  "feeds": [
-    {
-      "name": "Feed Name",
-      "url": "https://example.com/feed.xml",
-      "tags": ["tag1", "tag2"],
-      "max_items": 10
-    }
-  ]
-}
+```bash
+python feed_cli.py --database data/rss_tracker.db add \
+  https://example.com/feed.xml --name "Feed Name" --tag tag1 --max-items 10
+python feed_cli.py --database data/rss_tracker.db list
+python feed_cli.py --database data/rss_tracker.db disable https://example.com/feed.xml
 ```
 
-Fields:
-- `name` - Display name for the feed
-- `url` - RSS feed URL (required)
-- `tags` - Array of tags to apply to items from this feed (optional)
-- `max_items` - Number of items to fetch when adding a new feed (optional, defaults to 10)
+The CLI also supports `update`, `enable`, `stats`, and `export-json`. SQLite uses
+WAL mode and a busy timeout so the tracker and management CLI can safely access
+the database concurrently.
+
+### OpenClaw
+
+Mount the entire tracker data directory so SQLite's database, WAL, and shared
+memory files stay together, and mount `feed_cli.py` plus `storage.py` read-only.
+OpenClaw can then manage feeds without restarting the scraper:
+
+```bash
+python3 /data/rss-wallabag-tools/feed_cli.py \
+  --database /data/rss-wallabag/rss_tracker.db list --json
+```
+
+## Migrating from JSON
+
+On first startup, the tracker imports `feeds.json` and `seen_items.json` in one
+transaction. It canonicalizes item URLs, collapses equivalent records, and
+records a migration marker so later changes to the legacy files are ignored.
+The original files are retained for rollback.
+
+Run only the migration without contacting Wallabag:
+
+```bash
+python rss_tracker.py --migrate-only
+```
 
 ## How It Works
 
 1. The service runs continuously, checking feeds every 30 minutes
-2. For each feed, it fetches the RSS feed and parses entries
+2. For each enabled SQLite feed, it fetches and parses entries
 3. It resolves relative URLs and removes URL fragments before checking for duplicates
-4. It checks each item against `seen_items.json` to avoid duplicates
+4. It checks each item against the SQLite seen-items table
 5. New items are posted to Wallabag via the API
-6. Successfully posted items are saved atomically in `seen_items.json`
+6. Successfully posted items are committed immediately to SQLite
 
 ## Files
 
-- `feeds.json` - RSS feed configuration (read-only mount)
-- `seen_items.json` - Tracks which items have been processed (read-write)
+- `data/rss_tracker.db` - Feeds, seen items, and migration metadata
+- `feeds.json` and `data/seen_items.json` - Retained one-time migration sources
 
 ## Logs
 
@@ -69,11 +89,8 @@ docker-compose logs -f
 
 ## Restarting
 
-After modifying `feeds.json`, restart the container:
-```bash
-cd ~/docker/rss-wallabag
-docker-compose restart
-```
+Feed-management changes are picked up on the next 30-minute cycle; no restart
+is required.
 
 ## Updating Code
 

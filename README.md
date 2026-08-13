@@ -5,7 +5,7 @@ This service automatically fetches RSS feeds every 30 minutes and posts new item
 ## Features
 
 - Fetches RSS feeds on a 30-minute schedule
-- Tracks seen items to avoid duplicates
+- Normalizes article URLs and tracks seen items to avoid duplicates
 - When adding a new feed, fetches the last 10 items by default
 - Stores feeds in `feeds.json` for easy management
 - Automatically posts new items to Wallabag via API
@@ -49,9 +49,10 @@ Fields:
 
 1. The service runs continuously, checking feeds every 30 minutes
 2. For each feed, it fetches the RSS feed and parses entries
-3. It checks each item against `seen_items.json` to avoid duplicates
-4. New items are posted to Wallabag via the API
-5. Seen items are tracked in `seen_items.json`
+3. It resolves relative URLs and removes URL fragments before checking for duplicates
+4. It checks each item against `seen_items.json` to avoid duplicates
+5. New items are posted to Wallabag via the API
+6. Successfully posted items are saved atomically in `seen_items.json`
 
 ## Files
 

@@ -9,7 +9,7 @@ import feed_cli
 
 
 class FeedCliTests(unittest.TestCase):
-    def test_add_list_disable_and_stats(self):
+    def test_add_list_disable_and_stats(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database_file = str(Path(temporary_directory) / "tracker.db")
 

@@ -1,0 +1,39 @@
+[project]
+name = "rss-wallabag"
+version = "0.1.0"
+description = "RSS feed tracker that sends unseen articles to Wallabag"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "feedparser>=6.0.10,<7",
+    "requests>=2.31,<3",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16,<1",
+]
+
+[tool.uv]
+package = false
+required-version = ">=0.11.23,<0.12"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+extend-exclude = ["history"]
+
+[tool.ruff.lint]
+select = [
+    "ANN", # Require type annotations.
+    "B",   # Catch likely bugs and design problems.
+    "E4",  # Import errors.
+    "E7",  # Statement errors.
+    "E9",  # Runtime and syntax errors.
+    "F",   # Pyflakes correctness checks.
+    "I",   # Deterministic import ordering.
+    "RUF", # Ruff-specific correctness checks.
+    "SIM", # Simplification and control-flow checks.
+    "TC",  # Keep type-only imports out of runtime code.
+    "UP",  # Modern Python syntax.
+]

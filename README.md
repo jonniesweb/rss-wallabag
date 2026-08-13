@@ -2,6 +2,25 @@
 
 This service automatically fetches RSS feeds every 30 minutes and posts new items to Wallabag.
 
+## Development
+
+The project uses [uv](https://docs.astral.sh/uv/) for Python and dependency
+management. The committed lockfile is the reproducible source of dependency
+versions for development, CI, and Docker builds. Ruff provides formatting,
+static analysis, and type-annotation enforcement.
+
+```bash
+uv sync --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python -m unittest discover -s tests -v
+```
+
+Runtime dependencies belong in `[project.dependencies]` and development-only
+tools belong in `[dependency-groups].dev` in `pyproject.toml`. Update the
+environment and lockfile with `uv add <package>` or `uv add --dev <package>`;
+use `uv lock --upgrade` when intentionally upgrading all dependencies.
+
 ## Features
 
 - Fetches RSS feeds on a 30-minute schedule
@@ -31,10 +50,10 @@ The service is configured via `docker-compose.yml` with the following environmen
 Use `feed_cli.py` to manage feeds:
 
 ```bash
-python feed_cli.py --database data/rss_tracker.db add \
+uv run python feed_cli.py --database data/rss_tracker.db add \
   https://example.com/feed.xml --name "Feed Name" --tag tag1 --max-items 10
-python feed_cli.py --database data/rss_tracker.db list
-python feed_cli.py --database data/rss_tracker.db disable https://example.com/feed.xml
+uv run python feed_cli.py --database data/rss_tracker.db list
+uv run python feed_cli.py --database data/rss_tracker.db disable https://example.com/feed.xml
 ```
 
 The CLI also supports `update`, `enable`, `stats`, and `export-json`. SQLite uses
@@ -62,7 +81,7 @@ The original files are retained for rollback.
 Run only the migration without contacting Wallabag:
 
 ```bash
-python rss_tracker.py --migrate-only
+uv run python rss_tracker.py --migrate-only
 ```
 
 ## How It Works

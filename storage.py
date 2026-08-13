@@ -1,24 +1,51 @@
 """SQLite persistence and legacy JSON migration for the RSS tracker."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 import sqlite3
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 from urllib.parse import urldefrag, urljoin
+
+if TYPE_CHECKING:
+    from types import TracebackType
 
 SCHEMA_VERSION = 1
 MIGRATION_KEY = "legacy_json_migration_v1"
 
 
-def utc_now():
-    return datetime.now(timezone.utc).isoformat()
+StrPath = str | os.PathLike[str]
 
 
-def normalize_item_url(feed_url, item_url):
+class Feed(TypedDict):
+    """A feed record exposed to the tracker and management CLI."""
+
+    id: int
+    name: str
+    url: str
+    tags: list[str]
+    max_items: int
+    enabled: bool
+    position: int
+
+
+class SeenRecord(TypedDict):
+    url: str
+    title: str
+    seen_at: str
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def normalize_item_url(feed_url: str, item_url: str) -> str:
     """Resolve an item URL and remove fragments that do not reach the server."""
     if not item_url:
         return item_url
@@ -28,7 +55,7 @@ def normalize_item_url(feed_url, item_url):
     return normalized_url
 
 
-def get_item_hash(feed_url, item_url):
+def get_item_hash(feed_url: str, item_url: str) -> str:
     """Return the stable identity used for an item within a feed."""
     normalized_url = normalize_item_url(feed_url, item_url)
     return hashlib.sha256(f"{feed_url}:{normalized_url}".encode()).hexdigest()
@@ -42,14 +69,14 @@ class MigrationReport:
     legacy_seen_records: int = 0
     collapsed_records: int = 0
 
-    def to_dict(self):
-        return asdict(self)
+    def to_dict(self) -> dict[str, bool | int]:
+        return cast("dict[str, bool | int]", asdict(self))
 
 
 class Storage:
     """Own the tracker database and its short, committed operations."""
 
-    def __init__(self, database_file, default_fetch_count=10):
+    def __init__(self, database_file: StrPath, default_fetch_count: int = 10) -> None:
         self.database_file = Path(database_file)
         self.default_fetch_count = default_fetch_count
         self.database_file.parent.mkdir(parents=True, exist_ok=True)
@@ -61,16 +88,21 @@ class Storage:
         self.connection.execute("PRAGMA synchronous = FULL")
         self._initialize_schema()
 
-    def close(self):
+    def close(self) -> None:
         self.connection.close()
 
-    def __enter__(self):
+    def __enter__(self) -> Storage:
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
-    def _initialize_schema(self):
+    def _initialize_schema(self) -> None:
         with self.connection:
             self.connection.executescript(
                 """
@@ -107,25 +139,25 @@ class Storage:
             )
             self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _next_position(self):
+    def _next_position(self) -> int:
         row = self.connection.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM feeds"
         ).fetchone()
-        return row["next_position"]
+        return int(row["next_position"])
 
     @staticmethod
-    def _decode_feed(row):
+    def _decode_feed(row: sqlite3.Row) -> Feed:
         return {
-            "id": row["id"],
-            "name": row["name"],
-            "url": row["url"],
-            "tags": json.loads(row["tags_json"]),
-            "max_items": row["max_items"],
+            "id": int(row["id"]),
+            "name": str(row["name"]),
+            "url": str(row["url"]),
+            "tags": cast("list[str]", json.loads(row["tags_json"])),
+            "max_items": int(row["max_items"]),
             "enabled": bool(row["enabled"]),
-            "position": row["position"],
+            "position": int(row["position"]),
         }
 
-    def list_feeds(self, enabled_only=True):
+    def list_feeds(self, enabled_only: bool = True) -> list[Feed]:
         where_clause = "WHERE enabled = 1" if enabled_only else ""
         rows = self.connection.execute(
             f"""
@@ -137,7 +169,7 @@ class Storage:
         ).fetchall()
         return [self._decode_feed(row) for row in rows]
 
-    def get_feed(self, url):
+    def get_feed(self, url: str) -> Feed | None:
         row = self.connection.execute(
             """
             SELECT id, name, url, tags_json, max_items, enabled, position
@@ -148,7 +180,13 @@ class Storage:
         ).fetchone()
         return self._decode_feed(row) if row else None
 
-    def add_feed(self, name, url, tags=None, max_items=None):
+    def add_feed(
+        self,
+        name: str,
+        url: str,
+        tags: list[str] | None = None,
+        max_items: int | None = None,
+    ) -> int:
         now = utc_now()
         tags = tags or []
         max_items = max_items if max_items is not None else self.default_fetch_count
@@ -169,11 +207,19 @@ class Storage:
                     now,
                 ),
             )
+        if cursor.lastrowid is None:
+            raise sqlite3.DatabaseError("Feed insert did not return an ID")
         return cursor.lastrowid
 
-    def update_feed(self, url, name=None, tags=None, max_items=None):
-        updates = []
-        values = []
+    def update_feed(
+        self,
+        url: str,
+        name: str | None = None,
+        tags: list[str] | None = None,
+        max_items: int | None = None,
+    ) -> bool:
+        updates: list[str] = []
+        values: list[object] = []
         if name is not None:
             updates.append("name = ?")
             values.append(name)
@@ -196,7 +242,7 @@ class Storage:
             )
         return cursor.rowcount == 1
 
-    def set_feed_enabled(self, url, enabled):
+    def set_feed_enabled(self, url: str, enabled: bool) -> bool:
         with self.connection:
             cursor = self.connection.execute(
                 "UPDATE feeds SET enabled = ?, updated_at = ? WHERE url = ?",
@@ -204,14 +250,14 @@ class Storage:
             )
         return cursor.rowcount == 1
 
-    def count_feeds(self, enabled_only=False):
+    def count_feeds(self, enabled_only: bool = False) -> int:
         where_clause = "WHERE enabled = 1" if enabled_only else ""
         row = self.connection.execute(
             f"SELECT COUNT(*) AS count FROM feeds {where_clause}"
         ).fetchone()
-        return row["count"]
+        return int(row["count"])
 
-    def count_seen(self, feed_id=None):
+    def count_seen(self, feed_id: int | None = None) -> int:
         if feed_id is None:
             row = self.connection.execute(
                 "SELECT COUNT(*) AS count FROM seen_items"
@@ -221,16 +267,23 @@ class Storage:
                 "SELECT COUNT(*) AS count FROM seen_items WHERE feed_id = ?",
                 (feed_id,),
             ).fetchone()
-        return row["count"]
+        return int(row["count"])
 
-    def has_seen(self, feed_id, item_hash):
+    def has_seen(self, feed_id: int, item_hash: str) -> bool:
         row = self.connection.execute(
             "SELECT 1 FROM seen_items WHERE feed_id = ? AND item_hash = ?",
             (feed_id, item_hash),
         ).fetchone()
         return row is not None
 
-    def record_seen(self, feed_id, item_hash, url, title, seen_at=None):
+    def record_seen(
+        self,
+        feed_id: int,
+        item_hash: str,
+        url: str,
+        title: str,
+        seen_at: str | None = None,
+    ) -> bool:
         seen_at = seen_at or utc_now()
         with self.connection:
             cursor = self.connection.execute(
@@ -243,55 +296,75 @@ class Storage:
             )
         return cursor.rowcount == 1
 
-    def _get_metadata(self, key):
+    def _get_metadata(self, key: str) -> str | None:
         row = self.connection.execute(
             "SELECT value FROM metadata WHERE key = ?",
             (key,),
         ).fetchone()
-        return row["value"] if row else None
+        return str(row["value"]) if row else None
 
-    def migrate_legacy_json(self, feeds_file, seen_file):
+    def migrate_legacy_json(
+        self, feeds_file: StrPath, seen_file: StrPath
+    ) -> MigrationReport:
         """Import the legacy JSON files once, preserving canonical identities."""
         if self._get_metadata(MIGRATION_KEY) is not None:
             return MigrationReport(False, self.count_feeds(), self.count_seen())
 
         feeds_path = Path(feeds_file)
         seen_path = Path(seen_file)
-        legacy_feeds = []
-        legacy_seen = {}
+        legacy_feeds: list[dict[str, object]] = []
+        legacy_seen: dict[str, dict[str, dict[str, object]]] = {}
 
         if feeds_path.exists():
             with feeds_path.open() as file_handle:
-                feeds_payload = json.load(file_handle)
-            legacy_feeds = feeds_payload.get("feeds", [])
-            if not isinstance(legacy_feeds, list):
+                feeds_payload = cast("dict[str, object]", json.load(file_handle))
+            raw_feeds = feeds_payload.get("feeds", [])
+            if not isinstance(raw_feeds, list):
                 raise ValueError("Legacy feeds JSON must contain a feeds list")
+            if not all(isinstance(feed, dict) for feed in raw_feeds):
+                raise ValueError("Every legacy feed must be an object")
+            legacy_feeds = cast("list[dict[str, object]]", raw_feeds)
 
         if seen_path.exists():
             with seen_path.open() as file_handle:
-                legacy_seen = json.load(file_handle)
-            if not isinstance(legacy_seen, dict):
+                raw_seen = json.load(file_handle)
+            if not isinstance(raw_seen, dict):
                 raise ValueError("Legacy seen-items JSON must contain an object")
+            legacy_seen = cast("dict[str, dict[str, dict[str, object]]]", raw_seen)
 
-        normalized_seen = {}
+        normalized_seen: dict[tuple[str, str], SeenRecord] = {}
         legacy_seen_records = 0
         for feed_url, items in legacy_seen.items():
             if not isinstance(items, dict):
                 raise TypeError(f"Seen items for {feed_url} must be an object")
             for record in items.values():
-                if not isinstance(record, dict) or not record.get("url"):
+                if not isinstance(record, dict):
+                    raise ValueError(f"Seen item for {feed_url} must be an object")
+                record_url = record.get("url")
+                if not isinstance(record_url, str) or not record_url:
                     raise ValueError(f"Seen item for {feed_url} is missing its URL")
+                record_title = record.get("title", "")
+                record_seen_at = record.get("seen_at")
+                if not isinstance(record_title, str):
+                    raise ValueError(f"Seen item for {feed_url} has an invalid title")
+                if record_seen_at is not None and not isinstance(record_seen_at, str):
+                    raise ValueError(
+                        f"Seen item for {feed_url} has an invalid timestamp"
+                    )
                 legacy_seen_records += 1
-                normalized_url = normalize_item_url(feed_url, record["url"])
+                normalized_url = normalize_item_url(feed_url, record_url)
                 item_hash = get_item_hash(feed_url, normalized_url)
-                normalized_record = {
+                normalized_record: SeenRecord = {
                     "url": normalized_url,
-                    "title": record.get("title", ""),
-                    "seen_at": record.get("seen_at") or utc_now(),
+                    "title": record_title,
+                    "seen_at": record_seen_at or utc_now(),
                 }
                 key = (feed_url, item_hash)
                 existing = normalized_seen.get(key)
-                if existing is None or normalized_record["seen_at"] > existing["seen_at"]:
+                if (
+                    existing is None
+                    or normalized_record["seen_at"] > existing["seen_at"]
+                ):
                     normalized_seen[key] = normalized_record
 
         now = utc_now()
@@ -300,8 +373,19 @@ class Storage:
             configured_urls = set()
             for offset, feed in enumerate(legacy_feeds):
                 feed_url = feed.get("url")
-                if not feed_url:
+                if not isinstance(feed_url, str) or not feed_url:
                     raise ValueError("Legacy feed is missing its URL")
+                feed_name = feed.get("name") or feed_url
+                feed_tags = feed.get("tags") or []
+                feed_max_items = feed.get("max_items", self.default_fetch_count)
+                if not isinstance(feed_name, str):
+                    raise ValueError(f"Legacy feed {feed_url} has an invalid name")
+                if not isinstance(feed_tags, list) or not all(
+                    isinstance(tag, str) for tag in feed_tags
+                ):
+                    raise ValueError(f"Legacy feed {feed_url} has invalid tags")
+                if not isinstance(feed_max_items, int):
+                    raise ValueError(f"Legacy feed {feed_url} has invalid max_items")
                 configured_urls.add(feed_url)
                 self.connection.execute(
                     """
@@ -315,10 +399,10 @@ class Storage:
                         updated_at = excluded.updated_at
                     """,
                     (
-                        feed.get("name") or feed_url,
+                        feed_name,
                         feed_url,
-                        json.dumps(feed.get("tags") or []),
-                        feed.get("max_items", self.default_fetch_count),
+                        json.dumps(feed_tags),
+                        feed_max_items,
                         next_position + offset,
                         now,
                         now,
@@ -383,9 +467,9 @@ class Storage:
 
         return report
 
-    def export_legacy_json(self, feeds_file, seen_file):
+    def export_legacy_json(self, feeds_file: StrPath, seen_file: StrPath) -> None:
         """Export a rollback-compatible snapshot of the SQLite data."""
-        feeds = []
+        feeds: list[dict[str, object]] = []
         for feed in self.list_feeds(enabled_only=False):
             feed_payload = {
                 "name": feed["name"],
@@ -396,7 +480,7 @@ class Storage:
             if feed["enabled"]:
                 feeds.append(feed_payload)
 
-        seen_items = {}
+        seen_items: dict[str, dict[str, SeenRecord]] = {}
         rows = self.connection.execute(
             """
             SELECT feeds.url AS feed_url, seen_items.item_hash, seen_items.url,
@@ -417,7 +501,7 @@ class Storage:
         _atomic_write_json(Path(seen_file), seen_items)
 
 
-def _atomic_write_json(path, payload):
+def _atomic_write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
     try:

@@ -4,19 +4,20 @@ RSS Feed Tracker that fetches RSS feeds and posts new items to Wallabag.
 Runs every 30 minutes.
 """
 
-import os
-import json
-import time
-import logging
-import hashlib
-import requests
 import argparse
+import hashlib
+import json
+import logging
+import os
 import signal
-import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urljoin
+
 import feedparser
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,7 +165,15 @@ class RSSFeedTracker:
         self.wallabag = WallabagClient()
         self.feeds_file = Path(FEEDS_FILE)
         self.seen_file = Path(SEEN_FILE)
-        self.seen_items = self.load_seen_items()
+        loaded_seen_items = self.load_seen_items()
+        self.seen_items, migration_count, collision_count = self.normalize_seen_items(loaded_seen_items)
+        if migration_count:
+            logger.info(
+                "Normalized %d saved item URLs and collapsed %d duplicate records",
+                migration_count,
+                collision_count,
+            )
+            self.save_seen_items()
         self.shutdown_requested = False
         self._setup_signal_handlers()
     
@@ -202,7 +211,7 @@ class RSSFeedTracker:
         try:
             # Check if path exists and is a directory (Docker volume mount issue)
             if self.seen_file.exists() and self.seen_file.is_dir():
-                logger.warning(f"seen_items.json is a directory, removing it and creating a new file")
+                logger.warning("seen_items.json is a directory, removing it and creating a new file")
                 import shutil
                 shutil.rmtree(self.seen_file)
             
@@ -216,16 +225,98 @@ class RSSFeedTracker:
             return {}
     
     def save_seen_items(self):
-        """Save seen items to seen_items.json."""
+        """Atomically save seen items to seen_items.json."""
+        temporary_path = None
         try:
-            with open(self.seen_file, 'w') as f:
+            self.seen_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                dir=self.seen_file.parent,
+                prefix=f'.{self.seen_file.name}.',
+                suffix='.tmp',
+                delete=False,
+            ) as f:
+                temporary_path = Path(f.name)
                 json.dump(self.seen_items, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            file_mode = self.seen_file.stat().st_mode & 0o777 if self.seen_file.exists() else 0o644
+            os.chmod(temporary_path, file_mode)
+            os.replace(temporary_path, self.seen_file)
+            temporary_path = None
+
+            directory_fd = os.open(self.seen_file.parent, getattr(os, 'O_DIRECTORY', 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return True
         except Exception as e:
             logger.error(f"Error saving seen items: {e}")
+            return False
+        finally:
+            if temporary_path:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def normalize_item_url(self, feed_url, item_url):
+        """Resolve an item URL and remove fragments that do not reach the server."""
+        if not item_url:
+            return item_url
+
+        absolute_url = urljoin(feed_url, item_url)
+        normalized_url, _fragment = urldefrag(absolute_url)
+        return normalized_url
+
+    def normalize_seen_items(self, seen_items):
+        """Re-key saved items using normalized URLs.
+
+        Returns the normalized state, the number of changed records, and the
+        number of records collapsed because their URLs differed only by a
+        fragment or relative spelling.
+        """
+        normalized_seen_items = {}
+        migration_count = 0
+        collision_count = 0
+
+        for feed_url, items in seen_items.items():
+            if not isinstance(items, dict):
+                normalized_seen_items[feed_url] = items
+                continue
+
+            normalized_items = {}
+            for old_hash, record in items.items():
+                if not isinstance(record, dict) or not record.get('url'):
+                    normalized_items[old_hash] = record
+                    continue
+
+                normalized_url = self.normalize_item_url(feed_url, record['url'])
+                normalized_hash = self.get_item_hash(feed_url, normalized_url)
+                normalized_record = dict(record)
+                normalized_record['url'] = normalized_url
+
+                if normalized_hash != old_hash or normalized_url != record['url']:
+                    migration_count += 1
+
+                existing_record = normalized_items.get(normalized_hash)
+                if existing_record is not None:
+                    collision_count += 1
+                    if normalized_record.get('seen_at', '') > existing_record.get('seen_at', ''):
+                        normalized_items[normalized_hash] = normalized_record
+                else:
+                    normalized_items[normalized_hash] = normalized_record
+
+            normalized_seen_items[feed_url] = normalized_items
+
+        return normalized_seen_items, migration_count, collision_count
     
     def get_item_hash(self, feed_url, item_url):
         """Generate a unique hash for an RSS item."""
-        return hashlib.sha256(f"{feed_url}:{item_url}".encode()).hexdigest()
+        normalized_url = self.normalize_item_url(feed_url, item_url)
+        return hashlib.sha256(f"{feed_url}:{normalized_url}".encode()).hexdigest()
     
     def get_item_published_date(self, item):
         """Extract publication date from RSS item and convert to ISO 8601 format (YYYY-MM-DDTHH:MM:SS+TZ)."""
@@ -270,13 +361,7 @@ class RSSFeedTracker:
         Returns:
             An absolute URL
         """
-        if not item_url:
-            return item_url
-        
-        # urljoin handles both relative and absolute URLs correctly
-        # If item_url is already absolute, it returns it unchanged
-        # If item_url is relative, it joins it with the base URL from feed_url
-        return urljoin(feed_url, item_url)
+        return self.normalize_item_url(feed_url, item_url)
     
     def fetch_feed(self, feed_url, max_items=None):
         """Fetch and parse an RSS feed."""
@@ -313,7 +398,6 @@ class RSSFeedTracker:
         """Process a single RSS feed."""
         feed_url = feed_config.get('url')
         feed_name = feed_config.get('name', feed_url)
-        tags = feed_config.get('tags', [])
         max_items = feed_config.get('max_items', DEFAULT_FETCH_COUNT)
         
         if not feed_url:
@@ -337,24 +421,14 @@ class RSSFeedTracker:
             if not item_url:
                 continue
             
-            # Resolve relative URLs to absolute URLs using the feed URL as base
-            item_url = self.resolve_url(feed_url, item_url)
+            # Resolve relative URLs and remove fragments before deduplication.
+            item_url = self.normalize_item_url(feed_url, item_url)
             
             item_hash = self.get_item_hash(feed_url, item_url)
             
             # Check if we've seen this item before
             if item_hash in self.seen_items.get(feed_key, {}):
                 continue
-            
-            # Mark as seen
-            if feed_key not in self.seen_items:
-                self.seen_items[feed_key] = {}
-            
-            self.seen_items[feed_key][item_hash] = {
-                'url': item_url,
-                'title': item.get('title', ''),
-                'seen_at': datetime.now().isoformat()
-            }
             
             # Extract tags from RSS item
             item_tags = []
@@ -379,6 +453,16 @@ class RSSFeedTracker:
             result = self.wallabag.create_entry(actual_url, title=item_title, tags=tags_string, published_at=published_date)
             
             if result:
+                if feed_key not in self.seen_items:
+                    self.seen_items[feed_key] = {}
+
+                self.seen_items[feed_key][item_hash] = {
+                    'url': item_url,
+                    'title': item_title,
+                    'seen_at': datetime.now().isoformat()
+                }
+                if not self.save_seen_items():
+                    logger.error(f"Posted item but failed to persist seen state: {item_url}")
                 new_count += 1
                 logger.info(f"Posted new item to Wallabag: {item_title}")
             else:
@@ -386,7 +470,6 @@ class RSSFeedTracker:
         
         if new_count > 0:
             logger.info(f"Processed {new_count} new items from {feed_name}")
-            self.save_seen_items()
     
     def run(self, once=False, clip=False):
         """Run the RSS feed tracker.

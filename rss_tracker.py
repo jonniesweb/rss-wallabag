@@ -1,45 +1,40 @@
 #!/usr/bin/env python3
-"""
-RSS Feed Tracker that fetches RSS feeds and posts new items to Wallabag.
-Runs every 30 minutes.
-"""
+"""Fetch RSS feeds and post new items to Wallabag."""
 
 import argparse
-import hashlib
 import json
 import logging
 import os
 import signal
-import tempfile
 import time
-from datetime import datetime
-from pathlib import Path
-from urllib.parse import urldefrag, urljoin
+from datetime import datetime, timezone
 
 import feedparser
 import requests
 
+from storage import Storage, get_item_hash, normalize_item_url
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Configuration from environment variables
-WALLABAG_URL = os.getenv('WALLABAG_URL', 'http://wallabag')
-WALLABAG_CLIENT_ID = os.getenv('WALLABAG_CLIENT_ID', '')
-WALLABAG_CLIENT_SECRET = os.getenv('WALLABAG_CLIENT_SECRET', '')
-WALLABAG_USERNAME = os.getenv('WALLABAG_USERNAME', '')
-WALLABAG_PASSWORD = os.getenv('WALLABAG_PASSWORD', '')
-FEEDS_FILE = os.getenv('FEEDS_FILE', '/app/feeds.json')
-SEEN_FILE = os.getenv('SEEN_FILE', '/app/data/seen_items.json')
-INTERVAL_MINUTES = int(os.getenv('INTERVAL_MINUTES', '30'))
-DEFAULT_FETCH_COUNT = int(os.getenv('DEFAULT_FETCH_COUNT', '10'))
+WALLABAG_URL = os.getenv("WALLABAG_URL", "http://wallabag")
+WALLABAG_CLIENT_ID = os.getenv("WALLABAG_CLIENT_ID", "")
+WALLABAG_CLIENT_SECRET = os.getenv("WALLABAG_CLIENT_SECRET", "")
+WALLABAG_USERNAME = os.getenv("WALLABAG_USERNAME", "")
+WALLABAG_PASSWORD = os.getenv("WALLABAG_PASSWORD", "")
+DATABASE_FILE = os.getenv("DATABASE_FILE", "/app/data/rss_tracker.db")
+LEGACY_FEEDS_FILE = os.getenv("LEGACY_FEEDS_FILE", "/app/legacy/feeds.json")
+LEGACY_SEEN_FILE = os.getenv("LEGACY_SEEN_FILE", "/app/data/seen_items.json")
+INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", "30"))
+DEFAULT_FETCH_COUNT = int(os.getenv("DEFAULT_FETCH_COUNT", "10"))
 
 
 class WallabagClient:
-    """Client for interacting with Wallabag API."""
-    
+    """Client for interacting with the Wallabag API."""
+
     def __init__(self):
         self.url = WALLABAG_URL
         self.client_id = WALLABAG_CLIENT_ID
@@ -48,527 +43,287 @@ class WallabagClient:
         self.password = WALLABAG_PASSWORD
         self.access_token = None
         self.token_expires_at = 0
-    
+
     def get_token(self):
-        """Get OAuth2 access token from Wallabag."""
-        # Check if we have a valid token
         if self.access_token and time.time() < self.token_expires_at:
             return self.access_token
-        
+
         token_url = f"{self.url}/oauth/v2/token"
-        
         data = {
-            'grant_type': 'password',
-            'client_id': self.client_id,
-            'client_secret': self.client_secret,
-            'username': self.username,
-            'password': self.password
+            "grant_type": "password",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "username": self.username,
+            "password": self.password,
         }
-        
+
         try:
             response = requests.post(token_url, data=data, timeout=10)
             response.raise_for_status()
             token_data = response.json()
-            self.access_token = token_data.get('access_token')
-            expires_in = token_data.get('expires_in', 3600)
-            self.token_expires_at = time.time() + expires_in - 60  # Refresh 1 min early
+            self.access_token = token_data.get("access_token")
+            self.token_expires_at = time.time() + token_data.get("expires_in", 3600) - 60
             logger.info("Successfully obtained Wallabag access token")
             return self.access_token
-        except Exception as e:
-            logger.error(f"Failed to get Wallabag token: {e}")
+        except (requests.RequestException, ValueError) as error:
+            logger.error("Failed to get Wallabag token: %s", error)
             return None
-    
+
     def create_entry(self, url, title=None, tags=None, published_at=None):
-        """Create a new entry in Wallabag.
-        
-        Args:
-            url: URL of the entry
-            title: Optional title for the entry
-            tags: Optional tags (list or comma-separated string)
-            published_at: Optional publication date in format YYYY-MM-DDTHH:MM:SS+0000
-        """
         if not self.get_token():
             logger.error("Cannot create entry: no access token")
             return None
-        
+
         entries_url = f"{self.url}/api/entries.json"
-        
         headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json'
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
         }
-        
-        params = {
-            'url': url,
-        }
-        
+        params = {"url": url}
         if title:
-            params['title'] = title
-        
+            params["title"] = title
         if tags:
-            # Tags should be a comma-separated string
-            if isinstance(tags, list):
-                tags = ','.join(tags)
-            params['tags'] = tags
-        
+            params["tags"] = ",".join(tags) if isinstance(tags, list) else tags
         if published_at:
-            # Ensure published_at is a string in the correct format
-            if not isinstance(published_at, str):
-                logger.warning(f"published_at must be a string, got {type(published_at)}")
-            else:
-                # Validate format: YYYY-MM-DDTHH:MM:SS+0000 (24 chars)
-                if len(published_at) == 24 and published_at[10] == 'T' and published_at[19] == '+':
-                    params['published_at'] = published_at
-                else:
-                    logger.warning(f"published_at format may be incorrect: {published_at} (expected YYYY-MM-DDTHH:MM:SS+0000)")
-                    # Still send it, but log a warning
-                    params['published_at'] = published_at
-        
+            params["published_at"] = published_at
+
+        response = None
         try:
-            if published_at:
-                logger.debug(f"Sending published_at: {published_at} for URL: {url}")
             response = requests.post(entries_url, headers=headers, json=params, timeout=10)
             response.raise_for_status()
             result = response.json()
-            
-            # If published_at was provided but not set in response, update the entry
-            if published_at:
-                returned_published = result.get('published_at')
-                if returned_published != published_at:
-                    entry_id = result.get('id')
-                    if entry_id:
-                        # Wait a moment for content fetching, then update
-                        time.sleep(3)
-                        update_url = f"{self.url}/api/entries/{entry_id}.json"
-                        update_params = {'published_at': published_at}
-                        try:
-                            update_resp = requests.patch(update_url, headers=headers, json=update_params, timeout=10)
-                            update_resp.raise_for_status()
-                            result = update_resp.json()
-                            logger.debug(f"Updated published_at to {published_at} for entry {entry_id}")
-                        except Exception as e:
-                            logger.debug(f"Failed to update published_at: {e}")
-            
-            logger.info(f"Created Wallabag entry: {title or url}")
+
+            if published_at and result.get("published_at") != published_at:
+                entry_id = result.get("id")
+                if entry_id:
+                    time.sleep(3)
+                    update_url = f"{self.url}/api/entries/{entry_id}.json"
+                    try:
+                        update_response = requests.patch(
+                            update_url,
+                            headers=headers,
+                            json={"published_at": published_at},
+                            timeout=10,
+                        )
+                        update_response.raise_for_status()
+                        result = update_response.json()
+                    except (requests.RequestException, ValueError) as error:
+                        logger.debug("Failed to update published_at: %s", error)
+
+            logger.info("Created Wallabag entry: %s", title or url)
             return result
-        except Exception as e:
-            logger.error(f"Failed to create Wallabag entry: {e}")
-            if 'response' in locals():
-                logger.error(f"Response: {response.text}")
+        except (requests.RequestException, ValueError) as error:
+            logger.error("Failed to create Wallabag entry: %s", error)
+            if response is not None:
+                logger.error("Response: %s", response.text)
             return None
 
 
 class RSSFeedTracker:
-    """Tracks RSS feeds and posts new items to Wallabag."""
-    
-    def __init__(self):
-        self.wallabag = WallabagClient()
-        self.feeds_file = Path(FEEDS_FILE)
-        self.seen_file = Path(SEEN_FILE)
-        loaded_seen_items = self.load_seen_items()
-        self.seen_items, migration_count, collision_count = self.normalize_seen_items(loaded_seen_items)
-        if migration_count:
-            logger.info(
-                "Normalized %d saved item URLs and collapsed %d duplicate records",
-                migration_count,
-                collision_count,
-            )
-            self.save_seen_items()
+    """Track RSS feeds in SQLite and post unseen items to Wallabag."""
+
+    def __init__(self, storage, wallabag=None, install_signal_handlers=True):
+        self.storage = storage
+        self.wallabag = wallabag or WallabagClient()
         self.shutdown_requested = False
-        self._setup_signal_handlers()
-    
+        if install_signal_handlers:
+            self._setup_signal_handlers()
+
     def _setup_signal_handlers(self):
-        """Set up signal handlers for graceful shutdown."""
-        def signal_handler(signum, frame):
-            # Get signal name for logging
+        def signal_handler(signum, _frame):
             signal_names = {
-                signal.SIGTERM: 'SIGTERM',
-                signal.SIGINT: 'SIGINT',
+                signal.SIGTERM: "SIGTERM",
+                signal.SIGINT: "SIGINT",
             }
-            signal_name = signal_names.get(signum, f'signal {signum}')
-            logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+            signal_name = signal_names.get(signum, f"signal {signum}")
+            logger.info("Received %s, initiating graceful shutdown...", signal_name)
             self.shutdown_requested = True
-        
+
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-    
+
     def load_feeds(self):
-        """Load RSS feeds from feeds.json."""
-        try:
-            if not self.feeds_file.exists():
-                logger.warning(f"Feeds file not found: {self.feeds_file}")
-                return []
-            
-            with open(self.feeds_file, 'r') as f:
-                feeds_data = json.load(f)
-                return feeds_data.get('feeds', [])
-        except Exception as e:
-            logger.error(f"Error loading feeds: {e}")
-            return []
-    
-    def load_seen_items(self):
-        """Load seen items from seen_items.json."""
-        try:
-            # Check if path exists and is a directory (Docker volume mount issue)
-            if self.seen_file.exists() and self.seen_file.is_dir():
-                logger.warning("seen_items.json is a directory, removing it and creating a new file")
-                import shutil
-                shutil.rmtree(self.seen_file)
-            
-            if not self.seen_file.exists():
-                return {}
-            
-            with open(self.seen_file, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Error loading seen items: {e}")
-            return {}
-    
-    def save_seen_items(self):
-        """Atomically save seen items to seen_items.json."""
-        temporary_path = None
-        try:
-            self.seen_file.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode='w',
-                dir=self.seen_file.parent,
-                prefix=f'.{self.seen_file.name}.',
-                suffix='.tmp',
-                delete=False,
-            ) as f:
-                temporary_path = Path(f.name)
-                json.dump(self.seen_items, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
+        return self.storage.list_feeds(enabled_only=True)
 
-            file_mode = self.seen_file.stat().st_mode & 0o777 if self.seen_file.exists() else 0o644
-            os.chmod(temporary_path, file_mode)
-            os.replace(temporary_path, self.seen_file)
-            temporary_path = None
+    @staticmethod
+    def normalize_item_url(feed_url, item_url):
+        return normalize_item_url(feed_url, item_url)
 
-            directory_fd = os.open(self.seen_file.parent, getattr(os, 'O_DIRECTORY', 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            return True
-        except Exception as e:
-            logger.error(f"Error saving seen items: {e}")
-            return False
-        finally:
-            if temporary_path:
+    @staticmethod
+    def get_item_hash(feed_url, item_url):
+        return get_item_hash(feed_url, item_url)
+
+    @staticmethod
+    def get_item_published_date(item):
+        for parsed_field in ("published_parsed", "updated_parsed"):
+            parsed_value = getattr(item, parsed_field, None)
+            if parsed_value:
                 try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-    def normalize_item_url(self, feed_url, item_url):
-        """Resolve an item URL and remove fragments that do not reach the server."""
-        if not item_url:
-            return item_url
-
-        absolute_url = urljoin(feed_url, item_url)
-        normalized_url, _fragment = urldefrag(absolute_url)
-        return normalized_url
-
-    def normalize_seen_items(self, seen_items):
-        """Re-key saved items using normalized URLs.
-
-        Returns the normalized state, the number of changed records, and the
-        number of records collapsed because their URLs differed only by a
-        fragment or relative spelling.
-        """
-        normalized_seen_items = {}
-        migration_count = 0
-        collision_count = 0
-
-        for feed_url, items in seen_items.items():
-            if not isinstance(items, dict):
-                normalized_seen_items[feed_url] = items
-                continue
-
-            normalized_items = {}
-            for old_hash, record in items.items():
-                if not isinstance(record, dict) or not record.get('url'):
-                    normalized_items[old_hash] = record
-                    continue
-
-                normalized_url = self.normalize_item_url(feed_url, record['url'])
-                normalized_hash = self.get_item_hash(feed_url, normalized_url)
-                normalized_record = dict(record)
-                normalized_record['url'] = normalized_url
-
-                if normalized_hash != old_hash or normalized_url != record['url']:
-                    migration_count += 1
-
-                existing_record = normalized_items.get(normalized_hash)
-                if existing_record is not None:
-                    collision_count += 1
-                    if normalized_record.get('seen_at', '') > existing_record.get('seen_at', ''):
-                        normalized_items[normalized_hash] = normalized_record
-                else:
-                    normalized_items[normalized_hash] = normalized_record
-
-            normalized_seen_items[feed_url] = normalized_items
-
-        return normalized_seen_items, migration_count, collision_count
-    
-    def get_item_hash(self, feed_url, item_url):
-        """Generate a unique hash for an RSS item."""
-        normalized_url = self.normalize_item_url(feed_url, item_url)
-        return hashlib.sha256(f"{feed_url}:{normalized_url}".encode()).hexdigest()
-    
-    def get_item_published_date(self, item):
-        """Extract publication date from RSS item and convert to ISO 8601 format (YYYY-MM-DDTHH:MM:SS+TZ)."""
-        # Try published_parsed first (most reliable)
-        if hasattr(item, 'published_parsed') and item.published_parsed:
-            try:
-                # Convert struct_time to datetime
-                dt = datetime(*item.published_parsed[:6])
-                # Format as ISO 8601 with timezone (assuming UTC if no timezone info)
-                # Use +0000 format (4 digits) instead of +00:00 (5 chars) as API expects
-                return dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
-            except (ValueError, OSError, TypeError) as e:
-                logger.debug(f"Error converting published_parsed to ISO format: {e}")
-        
-        # Fall back to updated_parsed if published_parsed is not available
-        if hasattr(item, 'updated_parsed') and item.updated_parsed:
-            try:
-                # Convert struct_time to datetime
-                dt = datetime(*item.updated_parsed[:6])
-                # Format as ISO 8601 with timezone (assuming UTC if no timezone info)
-                # Use +0000 format (4 digits) instead of +00:00 (5 chars) as API expects
-                return dt.strftime('%Y-%m-%dT%H:%M:%S+0000')
-            except (ValueError, OSError, TypeError) as e:
-                logger.debug(f"Error converting updated_parsed to ISO format: {e}")
-        
-        # If no parsed date available, return None
+                    date = datetime(*parsed_value[:6], tzinfo=timezone.utc)
+                    return date.strftime("%Y-%m-%dT%H:%M:%S+0000")
+                except (ValueError, OSError, TypeError) as error:
+                    logger.debug("Error converting %s: %s", parsed_field, error)
         return None
-    
-    def is_medium_url(self, url):
-        """Check if a URL is hosted on Medium."""
-        if not url:
-            return False
-        return 'medium.com' in url.lower()
-    
-    def resolve_url(self, feed_url, item_url):
-        """Resolve a potentially relative URL to an absolute URL using the feed URL as base.
-        
-        Args:
-            feed_url: The URL of the RSS feed (used as base)
-            item_url: The URL from the RSS item (may be relative or absolute)
-        
-        Returns:
-            An absolute URL
-        """
-        return self.normalize_item_url(feed_url, item_url)
-    
+
+    @staticmethod
+    def is_medium_url(url):
+        return bool(url and "medium.com" in url.lower())
+
     def fetch_feed(self, feed_url, max_items=None):
-        """Fetch and parse an RSS feed."""
         try:
-            logger.info(f"Fetching feed: {feed_url}")
-            # Fetch feed content with timeout
+            logger.info("Fetching feed: %s", feed_url)
             response = requests.get(feed_url, timeout=5)
             response.raise_for_status()
-            
-            # Parse the feed content
             feed = feedparser.parse(response.content)
-            
             if feed.bozo:
-                logger.warning(f"Feed parsing warning for {feed_url}: {feed.bozo_exception}")
-            
+                logger.warning("Feed parsing warning for %s: %s", feed_url, feed.bozo_exception)
             if not feed.entries:
-                logger.warning(f"No entries found in feed: {feed_url}")
+                logger.warning("No entries found in feed: %s", feed_url)
                 return []
-            
             items = feed.entries[:max_items] if max_items else feed.entries
-            logger.info(f"Found {len(items)} items in feed: {feed_url}")
+            logger.info("Found %d items in feed: %s", len(items), feed_url)
             return items
         except requests.exceptions.Timeout:
-            logger.error(f"Timeout fetching feed {feed_url} (5 seconds)")
+            logger.error("Timeout fetching feed %s (5 seconds)", feed_url)
             return []
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching feed {feed_url}: {e}")
+        except requests.exceptions.RequestException as error:
+            logger.error("Error fetching feed %s: %s", feed_url, error)
             return []
-        except Exception as e:
-            logger.error(f"Error parsing feed {feed_url}: {e}")
+        except (ValueError, TypeError, AttributeError) as error:
+            logger.error("Error parsing feed %s: %s", feed_url, error)
             return []
-    
+
     def process_feed(self, feed_config):
-        """Process a single RSS feed."""
-        feed_url = feed_config.get('url')
-        feed_name = feed_config.get('name', feed_url)
-        max_items = feed_config.get('max_items', DEFAULT_FETCH_COUNT)
-        
-        if not feed_url:
-            logger.error(f"Feed config missing URL: {feed_config}")
-            return
-        
-        # Check if this is a new feed (not in seen_items)
-        feed_key = feed_url
-        is_new_feed = feed_key not in self.seen_items
-        
-        if is_new_feed:
-            logger.info(f"New feed detected: {feed_name}. Fetching last {max_items} items.")
+        feed_id = feed_config["id"]
+        feed_url = feed_config["url"]
+        feed_name = feed_config.get("name", feed_url)
+        max_items = feed_config.get("max_items", DEFAULT_FETCH_COUNT)
+
+        if self.storage.count_seen(feed_id) == 0:
+            logger.info("New feed detected: %s. Fetching last %d items.", feed_name, max_items)
         else:
-            logger.info(f"Fetching last {max_items} items from {feed_name}.")
-        
+            logger.info("Fetching last %d items from %s.", max_items, feed_name)
+
         items = self.fetch_feed(feed_url, max_items=max_items)
-        
         new_count = 0
         for item in items:
-            item_url = item.get('link', '')
+            item_url = self.normalize_item_url(feed_url, item.get("link", ""))
             if not item_url:
                 continue
-            
-            # Resolve relative URLs and remove fragments before deduplication.
-            item_url = self.normalize_item_url(feed_url, item_url)
-            
+
             item_hash = self.get_item_hash(feed_url, item_url)
-            
-            # Check if we've seen this item before
-            if item_hash in self.seen_items.get(feed_key, {}):
+            if self.storage.has_seen(feed_id, item_hash):
                 continue
-            
-            # Extract tags from RSS item
+
             item_tags = []
-            if hasattr(item, 'tags') and item.tags:
-                # Tags are a list of dicts with 'term' keys
-                item_tags = [tag.get('term', '') for tag in item.tags if tag.get('term')]
-            elif hasattr(item, 'category') and item.category:
-                # Fallback to category if no tags
+            if getattr(item, "tags", None):
+                item_tags = [tag.get("term", "") for tag in item.tags if tag.get("term")]
+            elif getattr(item, "category", None):
                 item_tags = [item.category]
-            
-            # Post to Wallabag
-            item_title = item.get('title', '')
+
+            item_title = item.get("title", "")
             published_date = self.get_item_published_date(item)
-            tags_string = ','.join(item_tags) if item_tags else None
-            
-            # Use Freedium mirror for Medium posts
+            tags_string = ",".join(item_tags) if item_tags else None
             actual_url = item_url
             if self.is_medium_url(item_url):
                 actual_url = f"https://freedium-mirror.cfd/{item_url}"
-                logger.info(f"Using Freedium mirror for Medium post: {item_title}")
-            
-            result = self.wallabag.create_entry(actual_url, title=item_title, tags=tags_string, published_at=published_date)
-            
-            if result:
-                if feed_key not in self.seen_items:
-                    self.seen_items[feed_key] = {}
+                logger.info("Using Freedium mirror for Medium post: %s", item_title)
 
-                self.seen_items[feed_key][item_hash] = {
-                    'url': item_url,
-                    'title': item_title,
-                    'seen_at': datetime.now().isoformat()
-                }
-                if not self.save_seen_items():
-                    logger.error(f"Posted item but failed to persist seen state: {item_url}")
+            result = self.wallabag.create_entry(
+                actual_url,
+                title=item_title,
+                tags=tags_string,
+                published_at=published_date,
+            )
+            if result:
+                self.storage.record_seen(feed_id, item_hash, item_url, item_title)
                 new_count += 1
-                logger.info(f"Posted new item to Wallabag: {item_title}")
+                logger.info("Posted new item to Wallabag: %s", item_title)
             else:
-                logger.error(f"Failed to post item to Wallabag: {item_url}")
-        
-        if new_count > 0:
-            logger.info(f"Processed {new_count} new items from {feed_name}")
-    
+                logger.error("Failed to post item to Wallabag: %s", item_url)
+
+        if new_count:
+            logger.info("Processed %d new items from %s", new_count, feed_name)
+
     def run(self, once=False, clip=False):
-        """Run the RSS feed tracker.
-        
-        Args:
-            once: If True, process feeds once and exit. If False, run continuously.
-            clip: If True, process feeds once, sleep for interval, then exit.
-        """
-        mode_str = ""
-        if once:
-            mode_str = " (one-off run)"
-        elif clip:
-            mode_str = " (clip mode: will exit after sleep)"
-        logger.info("Starting RSS feed tracker" + mode_str)
-        
+        mode = " (one-off run)" if once else " (clip mode)" if clip else ""
+        logger.info("Starting RSS feed tracker%s", mode)
         try:
             while not self.shutdown_requested:
-                try:
-                    feeds = self.load_feeds()
-                    
-                    if not feeds:
-                        logger.warning("No feeds configured. Add feeds to feeds.json")
-                    else:
-                        logger.info(f"Processing {len(feeds)} feeds")
-                        for feed_config in feeds:
-                            if self.shutdown_requested:
-                                break
-                            try:
-                                self.process_feed(feed_config)
-                            except Exception as e:
-                                logger.error(f"Error processing feed {feed_config.get('url', 'unknown')}: {e}", exc_info=True)
-                    
-                    if once or self.shutdown_requested:
-                        break
-                    
-                    # Sleep in smaller intervals to check shutdown flag
-                    logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes...")
-                    sleep_seconds = INTERVAL_MINUTES * 60
-                    sleep_interval = 1  # Check every second
-                    slept = 0
-                    while slept < sleep_seconds and not self.shutdown_requested:
-                        time.sleep(min(sleep_interval, sleep_seconds - slept))
-                        slept += sleep_interval
-                    
-                    # Exit after sleep if clip mode
-                    if clip:
-                        logger.info("Clip mode: exiting after sleep")
-                        break
-                
-                except KeyboardInterrupt:
-                    logger.info("Received KeyboardInterrupt, shutting down...")
-                    self.shutdown_requested = True
+                feeds = self.load_feeds()
+                if not feeds:
+                    logger.warning("No feeds configured. Add feeds with feed_cli.py")
+                else:
+                    logger.info("Processing %d feeds", len(feeds))
+                    for feed_config in feeds:
+                        if self.shutdown_requested:
+                            break
+                        try:
+                            self.process_feed(feed_config)
+                        except Exception:
+                            logger.exception(
+                                "Error processing feed %s",
+                                feed_config.get("url", "unknown"),
+                            )
+
+                if once or self.shutdown_requested:
                     break
-                except Exception as e:
-                    logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                    if once or self.shutdown_requested:
-                        break
-                    # Sleep in smaller intervals to check shutdown flag
-                    logger.info(f"Sleeping for {INTERVAL_MINUTES} minutes before retry...")
-                    sleep_seconds = INTERVAL_MINUTES * 60
-                    sleep_interval = 1
-                    slept = 0
-                    while slept < sleep_seconds and not self.shutdown_requested:
-                        time.sleep(min(sleep_interval, sleep_seconds - slept))
-                        slept += sleep_interval
+
+                logger.info("Sleeping for %d minutes...", INTERVAL_MINUTES)
+                slept = 0
+                sleep_seconds = INTERVAL_MINUTES * 60
+                while slept < sleep_seconds and not self.shutdown_requested:
+                    time.sleep(min(1, sleep_seconds - slept))
+                    slept += 1
+                if clip:
+                    logger.info("Clip mode: exiting after sleep")
+                    break
         finally:
-            # Always save seen items on shutdown
-            if self.seen_items:
-                logger.info("Saving seen items before shutdown...")
-                self.save_seen_items()
             logger.info("RSS feed tracker stopped")
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description='RSS Feed Tracker for Wallabag')
-    parser.add_argument('--once', action='store_true', 
-                       help='Run once and exit instead of running continuously')
-    parser.add_argument('--clip', action='store_true',
-                       help='Run once, sleep for interval, then exit')
-    args = parser.parse_args()
-    
-    # Validate required configuration
-    required_vars = ['WALLABAG_CLIENT_ID', 'WALLABAG_CLIENT_SECRET', 
-                     'WALLABAG_USERNAME', 'WALLABAG_PASSWORD']
-    missing = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        exit(1)
-    
-    logger.info(f"Wallabag URL: {WALLABAG_URL}")
-    logger.info(f"Feeds file: {FEEDS_FILE}")
-    logger.info(f"Seen items file: {SEEN_FILE}")
-    logger.info(f"Check interval: {INTERVAL_MINUTES} minutes")
-    
-    tracker = RSSFeedTracker()
-    tracker.run(once=args.once, clip=args.clip)
+def build_parser():
+    parser = argparse.ArgumentParser(description="RSS Feed Tracker for Wallabag")
+    parser.add_argument("--once", action="store_true", help="Process feeds once and exit")
+    parser.add_argument("--clip", action="store_true", help="Process once, sleep, then exit")
+    parser.add_argument("--migrate-only", action="store_true", help="Migrate JSON and exit")
+    return parser
 
 
-if __name__ == '__main__':
-    main()
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    with Storage(DATABASE_FILE, DEFAULT_FETCH_COUNT) as storage:
+        report = storage.migrate_legacy_json(LEGACY_FEEDS_FILE, LEGACY_SEEN_FILE)
+        if report.performed:
+            logger.info(
+                "Migrated %d feeds and %d seen items to SQLite; collapsed %d equivalent records",
+                report.feed_count,
+                report.seen_count,
+                report.collapsed_records,
+            )
+
+        if args.migrate_only:
+            print(json.dumps(report.to_dict(), sort_keys=True))
+            return 0
+
+        required_variables = [
+            "WALLABAG_CLIENT_ID",
+            "WALLABAG_CLIENT_SECRET",
+            "WALLABAG_USERNAME",
+            "WALLABAG_PASSWORD",
+        ]
+        missing = [name for name in required_variables if not os.getenv(name)]
+        if missing:
+            logger.error("Missing required environment variables: %s", ", ".join(missing))
+            return 1
+
+        logger.info("Wallabag URL: %s", WALLABAG_URL)
+        logger.info("Database file: %s", DATABASE_FILE)
+        logger.info("Check interval: %d minutes", INTERVAL_MINUTES)
+        tracker = RSSFeedTracker(storage)
+        tracker.run(once=args.once, clip=args.clip)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

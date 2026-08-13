@@ -6,6 +6,9 @@ feeds.json
 
 # Runtime data
 seen_items.json
+*.db
+*.db-shm
+*.db-wal
 data/
 
 # Python

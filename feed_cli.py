@@ -6,20 +6,23 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Sequence
 
 from storage import Storage
 
 DEFAULT_DATABASE_FILE = os.getenv("DATABASE_FILE", "/data/rss-wallabag/rss_tracker.db")
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage RSS Wallabag feeds")
     parser.add_argument("--database", default=DEFAULT_DATABASE_FILE)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list", help="List configured feeds")
     list_parser.add_argument("--json", action="store_true", dest="as_json")
-    list_parser.add_argument("--all", action="store_true", help="Include disabled feeds")
+    list_parser.add_argument(
+        "--all", action="store_true", help="Include disabled feeds"
+    )
 
     add_parser = subparsers.add_parser("add", help="Add a feed")
     add_parser.add_argument("url")
@@ -34,18 +37,22 @@ def build_parser():
     update_parser.add_argument("--max-items", type=int)
 
     for command in ("enable", "disable"):
-        command_parser = subparsers.add_parser(command, help=f"{command.title()} a feed")
+        command_parser = subparsers.add_parser(
+            command, help=f"{command.title()} a feed"
+        )
         command_parser.add_argument("url")
 
     subparsers.add_parser("stats", help="Show database counts")
 
-    export_parser = subparsers.add_parser("export-json", help="Export rollback-compatible JSON")
+    export_parser = subparsers.add_parser(
+        "export-json", help="Export rollback-compatible JSON"
+    )
     export_parser.add_argument("--feeds-file", required=True)
     export_parser.add_argument("--seen-file", required=True)
     return parser
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         with Storage(args.database) as storage:
@@ -56,12 +63,16 @@ def main(argv=None):
                 else:
                     for feed in feeds:
                         state = "enabled" if feed["enabled"] else "disabled"
-                        print(f"{feed['name']}\t{feed['url']}\t{state}\tmax={feed['max_items']}")
+                        print(
+                            f"{feed['name']}\t{feed['url']}\t{state}\tmax={feed['max_items']}"
+                        )
             elif args.command == "add":
                 storage.add_feed(args.name, args.url, args.tag, args.max_items)
                 print(f"Added feed: {args.name}")
             elif args.command == "update":
-                if not storage.update_feed(args.url, args.name, args.tag, args.max_items):
+                if not storage.update_feed(
+                    args.url, args.name, args.tag, args.max_items
+                ):
                     print("No matching feed or no changes requested", file=sys.stderr)
                     return 1
                 print(f"Updated feed: {args.url}")

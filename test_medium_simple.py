@@ -3,11 +3,13 @@
 Simple test to verify Medium URL detection logic.
 """
 
-def is_medium_url(url):
+
+def is_medium_url(url: str) -> bool:
     """Check if a URL is hosted on Medium."""
     if not url:
         return False
-    return 'medium.com' in url.lower()
+    return "medium.com" in url.lower()
+
 
 # Test cases
 test_urls = [
@@ -24,10 +26,10 @@ print("=" * 80)
 for url in test_urls:
     is_medium = is_medium_url(url)
     symbol = "✅" if is_medium else "❌"
-    
+
     print(f"\n{symbol} URL: {url}")
     print(f"   Medium detected: {is_medium}")
-    
+
     if is_medium:
         freedium_url = f"https://freedium-mirror.cfd/{url}"
         print(f"   Transformed to: {freedium_url}")

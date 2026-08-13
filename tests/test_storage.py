@@ -8,24 +8,28 @@ from storage import MIGRATION_KEY, Storage, get_item_hash
 
 
 class StorageTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         self.database_file = self.root / "tracker.db"
         self.storage = Storage(self.database_file)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.storage.close()
         self.temporary_directory.cleanup()
 
-    def write_legacy_files(self):
+    def write_legacy_files(self) -> tuple[Path, Path, str, str]:
         feeds_file = self.root / "feeds.json"
         seen_file = self.root / "seen_items.json"
         feed_url = "https://example.com/feed.xml"
         fragment_url = "https://example.com/article/#atom"
         canonical_url = "https://example.com/article/"
-        fragment_hash = hashlib.sha256(f"{feed_url}:{fragment_url}".encode()).hexdigest()
-        canonical_hash = hashlib.sha256(f"{feed_url}:{canonical_url}".encode()).hexdigest()
+        fragment_hash = hashlib.sha256(
+            f"{feed_url}:{fragment_url}".encode()
+        ).hexdigest()
+        canonical_hash = hashlib.sha256(
+            f"{feed_url}:{canonical_url}".encode()
+        ).hexdigest()
         feeds_file.write_text(
             json.dumps(
                 {
@@ -64,21 +68,25 @@ class StorageTests(unittest.TestCase):
         )
         return feeds_file, seen_file, feed_url, canonical_url
 
-    def test_database_uses_wal_and_foreign_keys(self):
-        journal_mode = self.storage.connection.execute("PRAGMA journal_mode").fetchone()[0]
-        foreign_keys = self.storage.connection.execute("PRAGMA foreign_keys").fetchone()[0]
+    def test_database_uses_wal_and_foreign_keys(self) -> None:
+        journal_mode = self.storage.connection.execute(
+            "PRAGMA journal_mode"
+        ).fetchone()[0]
+        foreign_keys = self.storage.connection.execute(
+            "PRAGMA foreign_keys"
+        ).fetchone()[0]
 
         self.assertEqual("wal", journal_mode)
         self.assertEqual(1, foreign_keys)
 
-    def test_second_connection_can_manage_feeds(self):
+    def test_second_connection_can_manage_feeds(self) -> None:
         with Storage(self.database_file) as manager:
             manager.add_feed("Example", "https://example.com/feed.xml")
 
         self.assertEqual(1, self.storage.count_feeds())
         self.assertEqual("Example", self.storage.list_feeds()[0]["name"])
 
-    def test_migration_imports_json_and_collapses_equivalent_items(self):
+    def test_migration_imports_json_and_collapses_equivalent_items(self) -> None:
         feeds_file, seen_file, feed_url, canonical_url = self.write_legacy_files()
 
         report = self.storage.migrate_legacy_json(feeds_file, seen_file)
@@ -100,7 +108,7 @@ class StorageTests(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(metadata)
 
-    def test_migration_is_idempotent(self):
+    def test_migration_is_idempotent(self) -> None:
         feeds_file, seen_file, _feed_url, _canonical_url = self.write_legacy_files()
         self.storage.migrate_legacy_json(feeds_file, seen_file)
 
@@ -110,7 +118,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(2, second_report.feed_count)
         self.assertEqual(1, second_report.seen_count)
 
-    def test_feed_management_preserves_seen_items_when_disabled(self):
+    def test_feed_management_preserves_seen_items_when_disabled(self) -> None:
         feed_id = self.storage.add_feed(
             "Example",
             "https://example.com/feed.xml",
@@ -143,7 +151,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(20, feed["max_items"])
         self.assertEqual(1, self.storage.count_seen(feed_id))
 
-    def test_export_json_is_rollback_compatible(self):
+    def test_export_json_is_rollback_compatible(self) -> None:
         feeds_file, seen_file, feed_url, _canonical_url = self.write_legacy_files()
         self.storage.migrate_legacy_json(feeds_file, seen_file)
         exported_feeds = self.root / "exported-feeds.json"

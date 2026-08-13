@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """Fetch RSS feeds and post new items to Wallabag."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import os
 import signal
 import time
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Protocol, cast
 
 import feedparser
 import requests
 
-from storage import Storage, get_item_hash, normalize_item_url
+from storage import Feed, Storage, get_item_hash, normalize_item_url
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,20 +38,34 @@ LEGACY_SEEN_FILE = os.getenv("LEGACY_SEEN_FILE", "/app/data/seen_items.json")
 INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", "30"))
 DEFAULT_FETCH_COUNT = int(os.getenv("DEFAULT_FETCH_COUNT", "10"))
 
+FeedEntry = Mapping[str, object]
+
+
+class Wallabag(Protocol):
+    """The Wallabag operation used by the feed tracker."""
+
+    def create_entry(
+        self,
+        url: str,
+        title: str | None = None,
+        tags: str | list[str] | None = None,
+        published_at: str | None = None,
+    ) -> dict[str, object] | None: ...
+
 
 class WallabagClient:
     """Client for interacting with the Wallabag API."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.url = WALLABAG_URL
         self.client_id = WALLABAG_CLIENT_ID
         self.client_secret = WALLABAG_CLIENT_SECRET
         self.username = WALLABAG_USERNAME
         self.password = WALLABAG_PASSWORD
-        self.access_token = None
-        self.token_expires_at = 0
+        self.access_token: str | None = None
+        self.token_expires_at = 0.0
 
-    def get_token(self):
+    def get_token(self) -> str | None:
         if self.access_token and time.time() < self.token_expires_at:
             return self.access_token
 
@@ -61,15 +82,27 @@ class WallabagClient:
             response = requests.post(token_url, data=data, timeout=10)
             response.raise_for_status()
             token_data = response.json()
-            self.access_token = token_data.get("access_token")
-            self.token_expires_at = time.time() + token_data.get("expires_in", 3600) - 60
+            access_token = token_data.get("access_token")
+            expires_in = token_data.get("expires_in", 3600)
+            if not isinstance(access_token, str) or not isinstance(
+                expires_in, int | float
+            ):
+                raise ValueError("Wallabag returned an invalid token response")
+            self.access_token = access_token
+            self.token_expires_at = time.time() + expires_in - 60
             logger.info("Successfully obtained Wallabag access token")
             return self.access_token
         except (requests.RequestException, ValueError) as error:
             logger.error("Failed to get Wallabag token: %s", error)
             return None
 
-    def create_entry(self, url, title=None, tags=None, published_at=None):
+    def create_entry(
+        self,
+        url: str,
+        title: str | None = None,
+        tags: str | list[str] | None = None,
+        published_at: str | None = None,
+    ) -> dict[str, object] | None:
         if not self.get_token():
             logger.error("Cannot create entry: no access token")
             return None
@@ -89,9 +122,11 @@ class WallabagClient:
 
         response = None
         try:
-            response = requests.post(entries_url, headers=headers, json=params, timeout=10)
+            response = requests.post(
+                entries_url, headers=headers, json=params, timeout=10
+            )
             response.raise_for_status()
-            result = response.json()
+            result = cast("dict[str, object]", response.json())
 
             if published_at and result.get("published_at") != published_at:
                 entry_id = result.get("id")
@@ -106,7 +141,7 @@ class WallabagClient:
                             timeout=10,
                         )
                         update_response.raise_for_status()
-                        result = update_response.json()
+                        result = cast("dict[str, object]", update_response.json())
                     except (requests.RequestException, ValueError) as error:
                         logger.debug("Failed to update published_at: %s", error)
 
@@ -122,15 +157,20 @@ class WallabagClient:
 class RSSFeedTracker:
     """Track RSS feeds in SQLite and post unseen items to Wallabag."""
 
-    def __init__(self, storage, wallabag=None, install_signal_handlers=True):
+    def __init__(
+        self,
+        storage: Storage,
+        wallabag: Wallabag | None = None,
+        install_signal_handlers: bool = True,
+    ) -> None:
         self.storage = storage
         self.wallabag = wallabag or WallabagClient()
         self.shutdown_requested = False
         if install_signal_handlers:
             self._setup_signal_handlers()
 
-    def _setup_signal_handlers(self):
-        def signal_handler(signum, _frame):
+    def _setup_signal_handlers(self) -> None:
+        def signal_handler(signum: int, _frame: FrameType | None) -> None:
             signal_names = {
                 signal.SIGTERM: "SIGTERM",
                 signal.SIGINT: "SIGINT",
@@ -142,47 +182,51 @@ class RSSFeedTracker:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-    def load_feeds(self):
+    def load_feeds(self) -> list[Feed]:
         return self.storage.list_feeds(enabled_only=True)
 
     @staticmethod
-    def normalize_item_url(feed_url, item_url):
+    def normalize_item_url(feed_url: str, item_url: str) -> str:
         return normalize_item_url(feed_url, item_url)
 
     @staticmethod
-    def get_item_hash(feed_url, item_url):
+    def get_item_hash(feed_url: str, item_url: str) -> str:
         return get_item_hash(feed_url, item_url)
 
     @staticmethod
-    def get_item_published_date(item):
+    def get_item_published_date(item: FeedEntry) -> str | None:
         for parsed_field in ("published_parsed", "updated_parsed"):
             parsed_value = getattr(item, parsed_field, None)
             if parsed_value:
                 try:
-                    date = datetime(*parsed_value[:6], tzinfo=timezone.utc)
+                    date = datetime(*parsed_value[:6], tzinfo=UTC)
                     return date.strftime("%Y-%m-%dT%H:%M:%S+0000")
                 except (ValueError, OSError, TypeError) as error:
                     logger.debug("Error converting %s: %s", parsed_field, error)
         return None
 
     @staticmethod
-    def is_medium_url(url):
+    def is_medium_url(url: str) -> bool:
         return bool(url and "medium.com" in url.lower())
 
-    def fetch_feed(self, feed_url, max_items=None):
+    def fetch_feed(
+        self, feed_url: str, max_items: int | None = None
+    ) -> list[FeedEntry]:
         try:
             logger.info("Fetching feed: %s", feed_url)
             response = requests.get(feed_url, timeout=5)
             response.raise_for_status()
             feed = feedparser.parse(response.content)
             if feed.bozo:
-                logger.warning("Feed parsing warning for %s: %s", feed_url, feed.bozo_exception)
+                logger.warning(
+                    "Feed parsing warning for %s: %s", feed_url, feed.bozo_exception
+                )
             if not feed.entries:
                 logger.warning("No entries found in feed: %s", feed_url)
                 return []
             items = feed.entries[:max_items] if max_items else feed.entries
             logger.info("Found %d items in feed: %s", len(items), feed_url)
-            return items
+            return cast("list[FeedEntry]", items)
         except requests.exceptions.Timeout:
             logger.error("Timeout fetching feed %s (5 seconds)", feed_url)
             return []
@@ -193,14 +237,16 @@ class RSSFeedTracker:
             logger.error("Error parsing feed %s: %s", feed_url, error)
             return []
 
-    def process_feed(self, feed_config):
+    def process_feed(self, feed_config: Feed) -> None:
         feed_id = feed_config["id"]
         feed_url = feed_config["url"]
         feed_name = feed_config.get("name", feed_url)
         max_items = feed_config.get("max_items", DEFAULT_FETCH_COUNT)
 
         if self.storage.count_seen(feed_id) == 0:
-            logger.info("New feed detected: %s. Fetching last %d items.", feed_name, max_items)
+            logger.info(
+                "New feed detected: %s. Fetching last %d items.", feed_name, max_items
+            )
         else:
             logger.info("Fetching last %d items from %s.", max_items, feed_name)
 
@@ -217,7 +263,9 @@ class RSSFeedTracker:
 
             item_tags = []
             if getattr(item, "tags", None):
-                item_tags = [tag.get("term", "") for tag in item.tags if tag.get("term")]
+                item_tags = [
+                    tag.get("term", "") for tag in item.tags if tag.get("term")
+                ]
             elif getattr(item, "category", None):
                 item_tags = [item.category]
 
@@ -245,7 +293,7 @@ class RSSFeedTracker:
         if new_count:
             logger.info("Processed %d new items from %s", new_count, feed_name)
 
-    def run(self, once=False, clip=False):
+    def run(self, once: bool = False, clip: bool = False) -> None:
         mode = " (one-off run)" if once else " (clip mode)" if clip else ""
         logger.info("Starting RSS feed tracker%s", mode)
         try:
@@ -282,15 +330,21 @@ class RSSFeedTracker:
             logger.info("RSS feed tracker stopped")
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RSS Feed Tracker for Wallabag")
-    parser.add_argument("--once", action="store_true", help="Process feeds once and exit")
-    parser.add_argument("--clip", action="store_true", help="Process once, sleep, then exit")
-    parser.add_argument("--migrate-only", action="store_true", help="Migrate JSON and exit")
+    parser.add_argument(
+        "--once", action="store_true", help="Process feeds once and exit"
+    )
+    parser.add_argument(
+        "--clip", action="store_true", help="Process once, sleep, then exit"
+    )
+    parser.add_argument(
+        "--migrate-only", action="store_true", help="Migrate JSON and exit"
+    )
     return parser
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     with Storage(DATABASE_FILE, DEFAULT_FETCH_COUNT) as storage:
         report = storage.migrate_legacy_json(LEGACY_FEEDS_FILE, LEGACY_SEEN_FILE)
@@ -314,7 +368,9 @@ def main(argv=None):
         ]
         missing = [name for name in required_variables if not os.getenv(name)]
         if missing:
-            logger.error("Missing required environment variables: %s", ", ".join(missing))
+            logger.error(
+                "Missing required environment variables: %s", ", ".join(missing)
+            )
             return 1
 
         logger.info("Wallabag URL: %s", WALLABAG_URL)

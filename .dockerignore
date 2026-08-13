@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.ruff_cache
+__pycache__
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+data
+history
+tests
+test_*.py
+docker-compose.yml
